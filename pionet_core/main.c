@@ -65,6 +65,8 @@ int main(void)
     uint32_t total_triggers = 0;
     uint32_t ones_count = 0;
     uint32_t loop_count = 0;
+    bool led_state = false;
+    uint32_t led_hold_counter = 0;
 
     while (1) {
         // Read 32-bit word directly from PIO RX FIFO (blocking wait)
@@ -76,9 +78,16 @@ int main(void)
         uint32_t match = pionet_compute_match(pdm_word, PIONET_STAGE1_PATTERN);
         if (match >= PIONET_STAGE1_THRESHOLD) {
             total_triggers++;
+            led_state = true;
+            led_hold_counter = 1000; // Hold LED on for ~31 ms (1000 words * 31.25 us)
             gpio_put(PIONET_LED_PIN, 1);
-        } else {
-            gpio_put(PIONET_LED_PIN, 0);
+        } else if (led_state) {
+            if (led_hold_counter > 0) {
+                led_hold_counter--;
+            } else {
+                led_state = false;
+                gpio_put(PIONET_LED_PIN, 0);
+            }
         }
 
         // Periodic telemetry reporting: Every 32,000 words (~1.0 second of audio)
