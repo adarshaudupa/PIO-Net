@@ -29,21 +29,25 @@ static uint32_t pdm_buf[2][BUF_WORDS];
 static volatile uint8_t dma_filling = 0; // Buffer DMA is currently writing to
 static volatile uint8_t  buf_ready    = 0;  // which buffer CPU should process
 static volatile bool     buf_flag     = false; // set by ISR when buffer is full
+static volatile uint32_t overrun_count = 0;
 uint32_t led_hold = 0;
 
 static int dma_chan;
 
 static void dma_isr(void) {
-    // Clear the interrupt
     dma_hw->ints0 = 1u << dma_chan;
 
-    // Mark which buffer is ready for CPU
-    buf_ready   = dma_filling;
-    dma_filling = 1 - dma_filling;   // Flip DMA to the other buffer
-    buf_flag  = true;
+    if (buf_flag) {
+        overrun_count++; // CPU did not finish previous buffer in 16 ms
+    }
 
-    // Rearm DMA to fill the other buffer
-    dma_channel_set_write_addr(dma_chan, pdm_buf[1 - buf_ready], true);
+    buf_ready   = dma_filling;
+    dma_filling = 1 - dma_filling;
+    buf_flag    = true;
+
+    // Explicit count reload + address trigger (satisfies Copilot & hardware safety)
+    dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
+    dma_channel_set_write_addr(dma_chan, pdm_buf[dma_filling], true);
 }
 
 int main(void)
@@ -144,10 +148,11 @@ int main(void)
         report_count += BUF_WORDS;
         if (report_count >= 32000) {
             float bit_density = (float)ones_count / (float)(report_count * 32);
-            printf("[Telemetry] Words: %lu | Density: %.3f | Stage-1 Triggers: %lu\n",
-                   (unsigned long)total_words,
-                   bit_density,
-                   (unsigned long)total_triggers);
+            printf("[Telemetry] Words: %lu | Density: %.3f | Stage-1: %lu | Overruns: %lu\n",
+       (unsigned long)total_words,
+       bit_density,
+       (unsigned long)total_triggers,
+       (unsigned long)overrun_count);
             report_count = 0;
             ones_count   = 0;
         }
