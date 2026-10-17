@@ -21,6 +21,7 @@
 #include "hardware/gpio.h"
 #include "hardware/dma.h"
 #include "hardware/irq.h"
+#include "hardware/sync.h"
 #include "pdm_reader.pio.h"
 
 // Double buffers: DMA ping-pongs between these
@@ -115,8 +116,8 @@ int main(void)
 
     while (1) {
         // Wait for DMA to signal a full buffer
-        if (!buf_flag) {
-            continue; // CPU is idlly spinning here, we can use __wfi() to make it sleep till interrupt is fired
+        while (!buf_flag) {
+            __wfi();
         }
         buf_flag = false;
 
@@ -130,7 +131,7 @@ int main(void)
             uint32_t match = pionet_compute_match(pdm_word, PIONET_STAGE1_PATTERN);
             if (match >= PIONET_STAGE1_THRESHOLD) {
                 total_triggers++;
-                led_hold = 1000; // Hold LED on for ~31 ms (1000 words * 31.25 us)
+                led_hold = PIONET_LED_HOLD_WORDS;
                 gpio_put(PIONET_LED_PIN, 1);
             } else if (led_hold > 0) {
                 led_hold--;

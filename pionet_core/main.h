@@ -43,6 +43,7 @@ extern "C" {
 // ------------------------------------------------------------------------------
 #define PIONET_STAGE1_PATTERN       0xFFFFFFFFu  // Acoustic high-pressure bitstream signature
 #define PIONET_STAGE1_THRESHOLD     22           // Minimum matching bits out of 32 (Hamming dist <= 10)
+#define PIONET_LED_HOLD_WORDS       1000    // ~31 ms hold for human eye; set to 0 for oscilloscope probing
 
 /**
  * @brief Computes bit match count (popcount of bitwise XNOR) between word and pattern.
