@@ -46,6 +46,7 @@ target_link_libraries(pionet_core PRIVATE
     pico_stdlib
     hardware_pio
     hardware_gpio
+        hardware_dma
 )
 
 pico_add_extra_outputs(pionet_core)

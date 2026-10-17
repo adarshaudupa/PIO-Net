@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "pico/stdlib.h"
+#include "hardware/dma.h"
 
 #ifdef __cplusplus
 extern "C" {

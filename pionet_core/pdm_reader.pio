@@ -1,50 +1,25 @@
-; ==============================================================================
-; PIO-Net State Machine A: PDM Microphone Audio Capture
-; Targets: Raspberry Pi RP2040 Programmable I/O (PIO) Block 0
-; Authors: Adarsh & Anukul (Embedded Team) & Gigi Koneti (ML / Acoustic Lead)
-;
-; Timing & Frequency Calculation:
-; - RP2040 System Clock: 125.0 MHz
-; - 2 instructions per PDM bit (1 cycle clock HIGH, 1 cycle clock LOW)
-; - Clock Divider = 125.0 MHz / (2 * 1.024 MHz) = 61.03515625
-; - Resulting PDM Clock on Pin 10 = 1.024 MHz (OSR = 64 relative to 16 kHz audio)
-; - Sampling: Data pin (GPIO 11) is sampled on the clock edge into ISR.
-; - Autopush: Automatically pushes 32-bit words into the RX FIFO every 32 bits (31.25 microseconds).
-; ==============================================================================
-
 .program pdm_reader
 .side_set 1
 
 .wrap_target
-    in pins, 1          side 1  ; Drive PDM CLK HIGH and sample PDM Data bit into ISR
-    nop                 side 0  ; Drive PDM CLK LOW
+    in pins, 1          side 1  ; CLK HIGH and sample PDM Data bit into ISR
+    nop                 side 0  ; CLK LOW
 .wrap
 
 % c-sdk {
-static inline void pdm_reader_program_init(PIO pio, uint sm, uint offset,
-                                           uint pin_data, uint pin_clk) {
+static inline void pdm_reader_program_init(PIO pio, uint sm, uint offset, uint pin_data, uint pin_clk) {
     pio_sm_config c = pdm_reader_program_get_default_config(offset);
 
-    // Pin mappings: pin_data is sampled into ISR, pin_clk is side-set
     sm_config_set_in_pins(&c, pin_data);
     sm_config_set_sideset_pins(&c, pin_clk);
-
-    // Shift Configuration:
-    // shift_right = true: First sampled bit lands at bit 0 (LSB), matching PIO-Net's
-    // verified PDM bitstream packing and matched filter evaluation.
-    // autopush = true, push_threshold = 32 bits
     sm_config_set_in_shift(&c, true, true, 32);
-
-    // Clock Divider: 125.0 MHz / (2 * 1.024 MHz) = 61.03515625
     sm_config_set_clkdiv(&c, 61.03515625f);
 
-    // Configure GPIO pin multiplexers for PIO ownership
     pio_gpio_init(pio, pin_data);
     pio_gpio_init(pio, pin_clk);
-    pio_sm_set_consecutive_pindirs(pio, sm, pin_clk,  1, true);   // Output clock
-    pio_sm_set_consecutive_pindirs(pio, sm, pin_data, 1, false);  // Input data
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_clk,  1, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_data, 1, false);
 
-    // Initialize and enable State Machine
     pio_sm_init(pio, sm, offset, &c);
     pio_sm_set_enabled(pio, sm, true);
 }
