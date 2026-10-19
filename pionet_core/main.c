@@ -138,22 +138,46 @@ int main(void)
         // Lock it — mark as active so ISR won't rearm DMA into it
         buf_state[proc] = 2;
 
-        // Process
+        // Process the completed buffer
         uint32_t *buf = pdm_buf[proc];
         for (uint32_t i = 0; i < BUF_WORDS; i++) {
-            // ... matched filter, LED, counts ...
+            uint32_t pdm_word = buf[i];
+            total_words++;
+            ones_count += __builtin_popcount(pdm_word);
+
+            uint32_t match = pionet_compute_match(pdm_word, PIONET_STAGE1_PATTERN);
+            if (match >= PIONET_STAGE1_THRESHOLD) {
+                total_triggers++;
+                led_hold = PIONET_LED_HOLD_WORDS;
+                gpio_put(PIONET_LED_PIN, 1);
+            } else if (led_hold > 0) {
+                led_hold--;
+            } else {
+                gpio_put(PIONET_LED_PIN, 0);
+            }
         }
 
         // Release buffer — DMA can now fill it again
         buf_state[proc] = 0;
 
-        // If DMA stalled due to overrun, restart it now
+        // If DMA stalled due to overrun, restart it cleanly (only trigger once)
         if (!dma_channel_is_busy(dma_chan)) {
             dma_filling = proc;
-            buf_state[proc] = 0; // still free
             dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
             dma_channel_set_write_addr(dma_chan, pdm_buf[dma_filling], true);
-            dma_channel_start(dma_chan);
+        }
+
+        // Telemetry every ~1 second (32000 words)
+        report_count += BUF_WORDS;
+        if (report_count >= 32000) {
+            float bit_density = (float)ones_count / (float)(report_count * 32);
+            printf("[Telemetry] Words: %lu | Density: %.3f | Stage-1: %lu | Overruns: %lu\n",
+                   (unsigned long)total_words,
+                   bit_density,
+                   (unsigned long)total_triggers,
+                   (unsigned long)overrun_count);
+            report_count = 0;
+            ones_count   = 0;
         }
     }
 }
