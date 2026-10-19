@@ -25,7 +25,12 @@
 #include "pdm_reader.pio.h"
 
 // Double buffers: DMA ping-pongs between these
-static uint32_t pdm_buf[2][BUF_WORDS];
+// Buffer 0 isolated to SRAM Bank 4 (scratch_x)
+static uint32_t __scratch_x("pdm_buf0") pdm_buf0[BUF_WORDS];
+// Buffer 1 isolated to SRAM Bank 5 (scratch_y)
+static uint32_t __scratch_y("pdm_buf1") pdm_buf1[BUF_WORDS];
+// Pointer array to maintain ping-pong indexing
+static uint32_t * const pdm_buf[2] = { pdm_buf0, pdm_buf1 };
 static volatile uint8_t dma_filling = 0; // Buffer DMA is currently writing to
 static volatile uint8_t buf_state[2] = {0, 0}; // Both buffers will be free at the start
 static volatile uint32_t overrun_count = 0;
