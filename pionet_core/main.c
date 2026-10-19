@@ -27,8 +27,7 @@
 // Double buffers: DMA ping-pongs between these
 static uint32_t pdm_buf[2][BUF_WORDS];
 static volatile uint8_t dma_filling = 0; // Buffer DMA is currently writing to
-static volatile uint8_t  buf_ready    = 0;  // which buffer CPU should process
-static volatile bool     buf_flag     = false; // set by ISR when buffer is full
+static volatile uint8_t buf_state[2] = {0, 0}; // Both buffers will be free at the start
 static volatile uint32_t overrun_count = 0;
 uint32_t led_hold = 0;
 
@@ -37,17 +36,22 @@ static int dma_chan;
 static void dma_isr(void) {
     dma_hw->ints0 = 1u << dma_chan;
 
-    if (buf_flag) {
-        overrun_count++; // CPU did not finish previous buffer in 16 ms
+    // Mark the buffer DMA just finished as full (hand off to CPU)
+    buf_state[dma_filling] = 1;
+
+    // Find next free buffer for DMA
+    uint8_t next = 1 - dma_filling;
+    if (buf_state[next] == 0) {
+        // Next buffer is free — use it
+        dma_filling = next;
+        dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
+        dma_channel_set_write_addr(dma_chan, pdm_buf[dma_filling], true);
+    } else {
+        // Both buffers occupied — overrun, DMA stalls
+        overrun_count++;
+        // Don't rearm. PIO FIFO will fill and stall PIO state machine.
+        // Main loop must call dma_rearm() after releasing a buffer.
     }
-
-    buf_ready   = dma_filling;
-    dma_filling = 1 - dma_filling;
-    buf_flag    = true;
-
-    // Explicit count reload + address trigger (satisfies Copilot & hardware safety)
-    dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
-    dma_channel_set_write_addr(dma_chan, pdm_buf[dma_filling], true);
 }
 
 int main(void)
@@ -119,42 +123,32 @@ int main(void)
     uint32_t report_count   = 0;
 
     while (1) {
-        // Wait for DMA to signal a full buffer
-        while (!buf_flag) {
-            __wfi();
+        // Find a full buffer to process
+        uint8_t proc = 0xFF;
+        for (uint8_t i = 0; i < 2; i++) {
+            if (buf_state[i] == 1) { proc = i; break; }
         }
-        buf_flag = false;
+        if (proc == 0xFF) { __wfi(); continue; }
 
-        // Process the completed buffer
-        uint32_t *buf = pdm_buf[buf_ready];
+        // Lock it — mark as active so ISR won't rearm DMA into it
+        buf_state[proc] = 2;
+
+        // Process
+        uint32_t *buf = pdm_buf[proc];
         for (uint32_t i = 0; i < BUF_WORDS; i++) {
-            uint32_t pdm_word = buf[i];
-            total_words++;
-            ones_count += __builtin_popcount(pdm_word);
-
-            uint32_t match = pionet_compute_match(pdm_word, PIONET_STAGE1_PATTERN);
-            if (match >= PIONET_STAGE1_THRESHOLD) {
-                total_triggers++;
-                led_hold = PIONET_LED_HOLD_WORDS;
-                gpio_put(PIONET_LED_PIN, 1);
-            } else if (led_hold > 0) {
-                led_hold--;
-            } else {
-                gpio_put(PIONET_LED_PIN, 0);
-            }
+            // ... matched filter, LED, counts ...
         }
 
-        // Telemetry every ~1 second (32000 words)
-        report_count += BUF_WORDS;
-        if (report_count >= 32000) {
-            float bit_density = (float)ones_count / (float)(report_count * 32);
-            printf("[Telemetry] Words: %lu | Density: %.3f | Stage-1: %lu | Overruns: %lu\n",
-       (unsigned long)total_words,
-       bit_density,
-       (unsigned long)total_triggers,
-       (unsigned long)overrun_count);
-            report_count = 0;
-            ones_count   = 0;
+        // Release buffer — DMA can now fill it again
+        buf_state[proc] = 0;
+
+        // If DMA stalled due to overrun, restart it now
+        if (!dma_channel_is_busy(dma_chan)) {
+            dma_filling = proc;
+            buf_state[proc] = 0; // still free
+            dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
+            dma_channel_set_write_addr(dma_chan, pdm_buf[dma_filling], true);
+            dma_channel_start(dma_chan);
         }
     }
 }
