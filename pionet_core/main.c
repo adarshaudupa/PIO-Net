@@ -34,7 +34,7 @@ static uint32_t * const pdm_buf[2] = { pdm_buf0, pdm_buf1 };
 static volatile uint8_t dma_filling = 0; // Buffer DMA is currently writing to
 static volatile uint8_t buf_state[2] = {0, 0}; // Both buffers will be free at the start
 static volatile uint32_t overrun_count = 0;
-uint32_t led_hold = 0;
+static uint32_t led_hold = 0;
 
 static int dma_chan;
 
@@ -164,7 +164,8 @@ int main(void)
         if (!dma_channel_is_busy(dma_chan)) {
             dma_filling = proc;
             dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
-            dma_channel_set_write_addr(dma_chan, pdm_buf[dma_filling], true);
+            dma_channel_set_write_addr(dma_chan, pdm_buf[dma_filling], false);
+            dma_channel_start(dma_chan);
         }
 
         // Telemetry every ~1 second (32000 words)
