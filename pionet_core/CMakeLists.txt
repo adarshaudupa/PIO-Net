@@ -28,12 +28,18 @@ set(CMAKE_CXX_STANDARD 17)
 # Initialize Raspberry Pi Pico SDK
 if (COMMAND pico_sdk_init)
     pico_sdk_init()
+    add_compile_options(-O3)
 endif ()
 
-add_executable(pionet_core)
+add_executable(pionet_core
+        model_data.h
+        stage2_infer.h
+        stage2_infer.c)
 
 # Generate C header from PIO assembly
 pico_generate_pio_header(pionet_core ${CMAKE_CURRENT_LIST_DIR}/pdm_reader.pio)
+pico_generate_pio_header(pionet_core ${CMAKE_CURRENT_LIST_DIR}/pdm_stage1.pio)
+
 
 target_sources(pionet_core PRIVATE main.c)
 
@@ -47,6 +53,7 @@ target_link_libraries(pionet_core PRIVATE
     hardware_pio
     hardware_gpio
         hardware_dma
+        pico_multicore
 )
 
 pico_add_extra_outputs(pionet_core)
