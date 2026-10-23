@@ -3,9 +3,12 @@
 
 #include <stdint.h>
 
-// Runs DS-CNN forward pass over a [39 x 16] float spectrogram
+// Runs DS-CNN forward pass over quantized [39 x 16] int8_t Mel-spectrogram
 // Returns predicted class index (0 to 11)
-int8_t stage2_classify(const float *spectrogram_features);
+int8_t stage2_classify(const int8_t *spectrogram_features);
+
+// Convenience wrapper for float spectrogram features
+int8_t stage2_classify_float(const float *spectrogram_features);
 
 // Returns the logit / score of the top-1 predicted class
 float  stage2_get_last_score(void);

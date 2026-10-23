@@ -18,14 +18,11 @@ float stage2_get_second_score(void) {
     return last_second_score;
 }
 
-int8_t stage2_classify(const float *in) {
-    // Convert float spectrogram to Q8 fixed-point (scale = 256)
+int8_t stage2_classify(const int8_t *in) {
+    // Convert int8_t quantized spectrogram (scale 32) to Q8 fixed-point (scale 256)
     static int16_t in_q8[39 * 16];
     for (int i = 0; i < 39 * 16; i++) {
-        int32_t val = (int32_t)(in[i] * 256.0f);
-        if (val > 32767) val = 32767;
-        if (val < -32768) val = -32768;
-        in_q8[i] = (int16_t)val;
+        in_q8[i] = (int16_t)in[i] << 3;
     }
 
     // 1. Conv1: [1, 39, 16] -> [16, 20, 8] into Arena A
@@ -188,4 +185,15 @@ int8_t stage2_classify(const float *in) {
     last_second_score = (float)second_logit / 256.0f;
     last_second_class = second_class;
     return best_class;
+}
+
+int8_t stage2_classify_float(const float *in) {
+    static int8_t in_q7[39 * 16];
+    for (int i = 0; i < 39 * 16; i++) {
+        int32_t val = (int32_t)(in[i] * 32.0f);
+        if (val > 127) val = 127;
+        if (val < -128) val = -128;
+        in_q7[i] = (int8_t)val;
+    }
+    return stage2_classify(in_q7);
 }

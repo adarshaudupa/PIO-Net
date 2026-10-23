@@ -17,7 +17,7 @@
 #define STAGE2_NUM_MELS         16
 
 /**
- * @brief Precomputes Hann window and FFT twiddle factors.
+ * @brief Precomputes Hann window, bit reversal, FFT twiddle factors, and Mel filterbank LUT.
  */
 void stage2_features_init(void);
 
@@ -25,9 +25,8 @@ void stage2_features_init(void);
  * @brief Extracts [39 x 16] float Mel-spectrogram from 1.0 second of 16 kHz PCM audio.
  * @param audio_pcm 16,000 int16_t PCM audio samples
  * @param out_spec  Output buffer for 39 x 16 = 624 float spectrogram features
- * @return true if valid acoustic speech modulation detected (std_dev >= 0.20f), false if silence/flat.
  */
-bool stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec);
+void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec);
 
 /**
  * @brief Returns the spectral standard deviation of the last extracted spectrogram.

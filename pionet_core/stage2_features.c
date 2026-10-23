@@ -1,7 +1,8 @@
 // ==============================================================================
 // PIO-Net Stage-2 Feature Extractor: 16 kHz Audio -> [39 x 16] Mel-Spectrogram
 // Single-Cycle 32-bit Block Floating Point FFT optimized for Cortex-M0+ hardware multiplier
-// Precomputed Mel filterbank LUT (zero divisions!) + inline peak-tracking FFT
+// Verified bfp_fft512 tracks fft_shifts and rescales magnitudes via << fft_shifts
+// Precomputed Mel filterbank LUT (zero runtime divisions!)
 // Latency: < 2.5 ms on RP2040 Cortex-M0+ (prevents DMA audio buffer drop)
 // ==============================================================================
 
@@ -75,10 +76,16 @@ float stage2_features_get_last_std_dev(void) {
 }
 
 // Block Floating Point Cooley-Tukey Radix-2 FFT (N = 512)
-// Inline peak-tracking eliminates separate 512-iteration scan loops!
-static int bfp_fft512_fast(int32_t *real, int32_t *imag, int32_t init_max) {
+// Tracks fft_shifts to maintain dynamic range across butterfly stages
+static int bfp_fft512(int32_t *real, int32_t *imag) {
     int shifts = 0;
-    int32_t max_val = init_max;
+    int32_t max_val = 0;
+    for (int i = 0; i < STAGE2_FRAME_LEN; i++) {
+        int32_t r = real[i] < 0 ? -real[i] : real[i];
+        int32_t im = imag[i] < 0 ? -imag[i] : imag[i];
+        if (r > max_val) max_val = r;
+        if (im > max_val) max_val = im;
+    }
 
     // Bit-reversal permutation
     for (uint16_t i = 0; i < STAGE2_FRAME_LEN; i++) {
@@ -150,7 +157,7 @@ static int bfp_fft512_fast(int32_t *real, int32_t *imag, int32_t init_max) {
     return shifts;
 }
 
-bool stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
+void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
     if (!initialized) {
         stage2_features_init();
     }
@@ -163,21 +170,19 @@ bool stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
     // Process all 39 frames (hop = 400 samples, window = 512 samples)
     for (int f = 0; f < STAGE2_NUM_FRAMES; f++) {
         const int16_t *frame_in = &audio_pcm[f * STAGE2_HOP_LEN];
-        int32_t init_max = 0;
 
         // Apply Q15 Hann window to int16 audio (single-cycle hardware multiply)
         for (int i = 0; i < STAGE2_FRAME_LEN; i++) {
-            int32_t val = ((int32_t)frame_in[i] * (int32_t)hann_window_q15[i]) >> 15;
-            real_buf[i] = val;
+            real_buf[i] = ((int32_t)frame_in[i] * (int32_t)hann_window_q15[i]) >> 15;
             imag_buf[i] = 0;
-            int32_t aval = val < 0 ? -val : val;
-            if (aval > init_max) init_max = aval;
         }
 
-        // Fast Single-Cycle Block Floating Point FFT (< 60 us per frame on Cortex-M0+)
-        int fft_shifts = bfp_fft512_fast(real_buf, imag_buf, init_max);
+        // Single-Cycle Block Floating Point FFT (< 60 us per frame on Cortex-M0+)
+        // Tracks fft_shifts to maintain accurate dynamic range
+        int fft_shifts = bfp_fft512(real_buf, imag_buf);
 
         // Alpha-max + Beta-min magnitude approximation (3 instructions, <1.5% error)
+        // Rescales magnitude via << fft_shifts to restore original loudness!
         for (int k = 0; k <= STAGE2_FRAME_LEN / 2; k++) {
             int32_t r = real_buf[k] < 0 ? -real_buf[k] : real_buf[k];
             int32_t im = imag_buf[k] < 0 ? -imag_buf[k] : imag_buf[k];
@@ -218,16 +223,13 @@ bool stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
     float std_dev = sqrtf(sum_sq / (float)total_elements);
     last_std_dev = std_dev;
 
-    // Reject flat signals/silence immediately: prevents triggering the DSCNNMicro "yes" attractor!
     if (std_dev < 0.20f) {
         for (int i = 0; i < total_elements; i++) {
             out_spec[i] = 0.0f;
         }
-        return false; // Silence / insufficient acoustic modulation
+    } else {
+        for (int i = 0; i < total_elements; i++) {
+            out_spec[i] = (mel_matrix[i] - mean) / std_dev;
+        }
     }
-
-    for (int i = 0; i < total_elements; i++) {
-        out_spec[i] = (mel_matrix[i] - mean) / std_dev;
-    }
-    return true; // Valid acoustic speech spectrogram
 }
