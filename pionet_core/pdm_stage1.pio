@@ -25,12 +25,12 @@
 
 .wrap_target
 start:
-    set x, 20              ; Threshold: 20 ones to trigger
+    set x, 18              ; Threshold: 19 ones to trigger (speech acoustic excursion >= +3)
     set y, 31              ; Window: 32 bit cycles
 
 sample_bit:
     wait 0 gpio 10         ; Wait for PDM CLK low
-    wait 1 gpio 10         ; Wait for PDM CLK rising edge
+    wait 1 gpio 10 [4]     ; Wait for PDM CLK rising edge + 32ns setup time
     jmp pin bit_is_high    ; Branch if PDM DATA (GPIO 11) is 1
 
 bit_is_low:

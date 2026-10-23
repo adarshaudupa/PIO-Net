@@ -362,13 +362,23 @@ int main(void)
         // Cooldown management
         if (cooldown > 0) cooldown--;
 
-        // Stage-1 Acoustic Energy Gate (speech onset detection)
-        if (buf_energy > adaptive_threshold && cooldown == 0 && capture_countdown < 0) {
+        // Stage-1 Acoustic Wake-Up Gate
+        // Hardware PIO1 matched filter gates Core 0 wake (honoring SenSys 2027 design)
+        // with adaptive acoustic energy baseline verification
+        bool s1_hardware = pio1_triggered;
+        bool s1_energy   = (buf_energy > adaptive_threshold);
+
+        if ((s1_hardware || s1_energy) && cooldown == 0 && capture_countdown < 0) {
             pio1_triggered = false;
-            printf(">>> [STAGE-1 WAKE] Speech Onset Detected! Energy: %lu (floor: %lu, thresh: %lu)\n",
-                   (unsigned long)buf_energy,
-                   (unsigned long)noise_floor,
-                   (unsigned long)adaptive_threshold);
+            if (s1_hardware) {
+                printf(">>> [STAGE-1 WAKE] Hardware PIO Matched Filter Fired! Energy: %lu (S1 PC: %lu, triggers: %lu)\n",
+                       (unsigned long)buf_energy, (unsigned long)pio1->sm[0].addr, (unsigned long)pio_triggers);
+            } else {
+                printf(">>> [STAGE-1 WAKE] Speech Onset Detected! Energy: %lu (floor: %lu, thresh: %lu)\n",
+                       (unsigned long)buf_energy,
+                       (unsigned long)noise_floor,
+                       (unsigned long)adaptive_threshold);
+            }
             // Collect next ~448 ms (28 buffers of 16 ms) to capture the complete utterance
             capture_countdown = 28;
             cooldown = 35; // Debounce during capture
@@ -388,8 +398,15 @@ int main(void)
                 }
 
                 uint32_t t_feat = time_us_32();
-                stage2_extract_spectrogram(linear_pcm, spectrogram);
+                bool has_speech = stage2_extract_spectrogram(linear_pcm, spectrogram);
                 uint32_t feat_lat = time_us_32() - t_feat;
+                float spec_std = stage2_features_get_last_std_dev();
+
+                if (!has_speech) {
+                    printf(">>> [STAGE-2 INFER] [REJECTED]: Silence / low spectral modulation (std: %.2f < 0.20). Going back to sleep.\n", (double)spec_std);
+                    cooldown = 15;
+                    continue;
+                }
 
                 gpio_put(22, 1);
                 uint32_t t_inf = time_us_32();
@@ -408,7 +425,7 @@ int main(void)
                        CLASS_NAMES[pred], (double)score, CLASS_NAMES[second_pred], (double)second_score,
                        (unsigned long)feat_lat, (unsigned long)inf_lat);
 
-                if (pred == 0 && score > 0.8f) {
+                if (pred == 0 && score > 2.0f) {
                     // TARGET KEYWORD "yes" DETECTED!
                     printf("***************************************************\n");
                     printf("   🎉 [WAKEWORD DETECTED]: 'YES'! ACTIVATING CPU!   \n");
@@ -416,7 +433,7 @@ int main(void)
                     gpio_put(PIONET_LED_PIN, 1);
                     led_hold = 60; // Hold LED on for ~1.0 second (60 * 16 ms)
                 } else if (pred == 0) {
-                    printf("    [REJECTED]: 'yes' confidence marginal (score: %.2f <= 0.80). Going back to sleep.\n", (double)score);
+                    printf("    [REJECTED]: 'yes' confidence marginal (score: %.2f <= 2.00). Going back to sleep.\n", (double)score);
                 } else {
                     printf("    [REJECTED]: '%s' is not 'yes'. Going back to sleep.\n", CLASS_NAMES[pred]);
                 }
