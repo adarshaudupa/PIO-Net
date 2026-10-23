@@ -158,7 +158,6 @@ int8_t stage2_classify(const int8_t *in) {
             best_class = (int8_t)cl;
         }
     }
-    printf("\n");
 
     return best_class;
 }

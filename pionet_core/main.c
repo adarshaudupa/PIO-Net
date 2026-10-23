@@ -220,10 +220,9 @@ int main(void)
     // PDM sigma-delta quantization noise variance changes 30x depending on
     // the mic's DC bias (which drifts between power cycles), so no fixed
     // -------------------------------------------------------------------------
-    // Adaptive DC baseline & noise floor tracking
     // -------------------------------------------------------------------------
-    static int32_t  dc_center_q8       = (265 << 8); // Sub-bit DC baseline in Q8 format
-    static int32_t  dc_center          = 265;        // DC ones-per-sub-block
+    // Adaptive noise floor tracking
+    // -------------------------------------------------------------------------
     static uint32_t noise_floor        = 0;          // Adaptive silence energy baseline
     static uint32_t warmup_accum       = 0;          // Accumulator for warmup energy
     static uint32_t warmup_ones        = 0;          // Accumulator for warmup ones
@@ -252,6 +251,7 @@ int main(void)
         uint32_t buf_ones = 0, buf_energy = 0, buf_triggers = 0;
 
         // 32 sub-blocks of 16 words (512 bits = 0.5 ms per sub-block)
+        uint32_t sub_ones[32];
         for (uint32_t b = 0; b < 32; b++) {
             uint32_t block_ones = 0;
             for (uint32_t j = 0; j < 16; j++) {
@@ -260,7 +260,15 @@ int main(void)
                 buf_ones += ones;
                 block_ones += ones;
             }
-            int32_t dev = (int32_t)block_ones - dc_center;
+            sub_ones[b] = block_ones;
+        }
+
+        // The true DC bias of this exact 16 ms buffer is the mean across all 32 sub-blocks
+        int32_t frame_dc = (int32_t)(buf_ones / 32);
+
+        // Sub-block deviation from the frame's DC level represents true AC acoustic energy
+        for (uint32_t b = 0; b < 32; b++) {
+            int32_t dev = (int32_t)sub_ones[b] - frame_dc;
             if (dev < 0) dev = -dev;
             buf_energy += (uint32_t)dev;
         }
@@ -273,7 +281,7 @@ int main(void)
             uint32_t w0 = buf[s * 2];
             uint32_t w1 = buf[s * 2 + 1];
             int32_t ones = __builtin_popcount(w0) + __builtin_popcount(w1);
-            int32_t x = (ones - (dc_center >> 3)) << 9; // scale to 16-bit PCM
+            int32_t x = (ones - (frame_dc >> 3)) << 9; // scale to 16-bit PCM
             int32_t y = x - dc_filter_x + ((dc_filter_y * 32600) >> 15);
             dc_filter_x = x;
             dc_filter_y = y;
@@ -297,9 +305,7 @@ int main(void)
             warmup--;
             if (warmup == 0) {
                 noise_floor  = warmup_accum / 30;
-                int32_t mean = (int32_t)(warmup_ones / (30 * 32));
-                dc_center_q8 = mean << 8;
-                dc_center    = mean;
+                if (noise_floor < 15) noise_floor = 15;
             }
             stat_words += BUF_WORDS;
             stat_ones  += buf_ones;
@@ -316,21 +322,16 @@ int main(void)
         }
 
         // Compute adaptive threshold:
-        // Silence is ~25-38. Speech is ~72-105. Minimum threshold of 58
-        // completely eliminates false blinks in silence while catching normal speech.
+        // Silence AC variance is ~15-25. Normal speech AC variance is ~150-600.
+        // Minimum threshold of 58 completely eliminates false triggers in silence
+        // while reliably catching speech onset.
         uint32_t margin = noise_floor / 2;
         if (margin < 25) margin = 25;
         uint32_t adaptive_threshold = noise_floor + margin;
         if (adaptive_threshold < 58) adaptive_threshold = 58;
 
-        // Adapt DC baseline and silence noise floor ONLY during silence (non-trigger frames)
+        // Adapt silence noise floor ONLY during silence (non-trigger frames)
         if (buf_energy < adaptive_threshold) {
-            // Track DC center gently (sub-bit precision with Q8 fixed point)
-            int32_t current_mean_q8 = (int32_t)((buf_ones << 8) / 32);
-            dc_center_q8 += (current_mean_q8 - dc_center_q8) >> 5;
-            dc_center = (dc_center_q8 + 128) >> 8;
-
-            // Symmetrical, steady noise floor tracker without downward leakage
             if (buf_energy > noise_floor) {
                 uint32_t step = (buf_energy - noise_floor) >> 4;
                 if (step < 1) step = 1;
@@ -361,8 +362,8 @@ int main(void)
         // Cooldown management
         if (cooldown > 0) cooldown--;
 
-        // Stage-1 Acoustic Energy Gate (adaptive threshold + PIO1 hardware trigger)
-        if ((buf_energy > adaptive_threshold || pio1_triggered) && cooldown == 0 && capture_countdown < 0) {
+        // Stage-1 Acoustic Energy Gate (speech onset detection)
+        if (buf_energy > adaptive_threshold && cooldown == 0 && capture_countdown < 0) {
             pio1_triggered = false;
             printf(">>> [STAGE-1 WAKE] Speech Onset Detected! Energy: %lu (floor: %lu, thresh: %lu)\n",
                    (unsigned long)buf_energy,

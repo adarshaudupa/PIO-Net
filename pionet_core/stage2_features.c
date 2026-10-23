@@ -170,6 +170,7 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, int8_t *out_spec) {
         sum_sq += diff * diff;
     }
     float std_dev = sqrtf(sum_sq / (float)total_elements) + 1e-6f;
+    if (std_dev < 1.0f) std_dev = 1.0f;
 
     // Quantize to INT8: normalized * 32.0, clamped to [-128, 127]
     for (int i = 0; i < total_elements; i++) {
