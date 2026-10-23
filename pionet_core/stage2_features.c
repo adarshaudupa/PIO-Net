@@ -76,16 +76,10 @@ float stage2_features_get_last_std_dev(void) {
 }
 
 // Block Floating Point Cooley-Tukey Radix-2 FFT (N = 512)
-// Tracks fft_shifts to maintain dynamic range across butterfly stages
-static int bfp_fft512(int32_t *real, int32_t *imag) {
+// init_max is pre-computed during windowing to avoid a separate O(N) scan
+static int bfp_fft512(int32_t *real, int32_t *imag, int32_t init_max) {
     int shifts = 0;
-    int32_t max_val = 0;
-    for (int i = 0; i < STAGE2_FRAME_LEN; i++) {
-        int32_t r = real[i] < 0 ? -real[i] : real[i];
-        int32_t im = imag[i] < 0 ? -imag[i] : imag[i];
-        if (r > max_val) max_val = r;
-        if (im > max_val) max_val = im;
-    }
+    int32_t max_val = init_max;
 
     // Bit-reversal permutation
     for (uint16_t i = 0; i < STAGE2_FRAME_LEN; i++) {
@@ -170,16 +164,20 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
     // Process all 39 frames (hop = 400 samples, window = 512 samples)
     for (int f = 0; f < STAGE2_NUM_FRAMES; f++) {
         const int16_t *frame_in = &audio_pcm[f * STAGE2_HOP_LEN];
+        int32_t init_max = 0;
 
         // Apply Q15 Hann window to int16 audio (single-cycle hardware multiply)
+        // Computes init_max for free during the same loop
         for (int i = 0; i < STAGE2_FRAME_LEN; i++) {
-            real_buf[i] = ((int32_t)frame_in[i] * (int32_t)hann_window_q15[i]) >> 15;
+            int32_t val = ((int32_t)frame_in[i] * (int32_t)hann_window_q15[i]) >> 15;
+            real_buf[i] = val;
             imag_buf[i] = 0;
+            int32_t aval = val < 0 ? -val : val;
+            if (aval > init_max) init_max = aval;
         }
 
         // Single-Cycle Block Floating Point FFT (< 60 us per frame on Cortex-M0+)
-        // Tracks fft_shifts to maintain accurate dynamic range
-        int fft_shifts = bfp_fft512(real_buf, imag_buf);
+        int fft_shifts = bfp_fft512(real_buf, imag_buf, init_max);
 
         // Alpha-max + Beta-min magnitude approximation (3 instructions, <1.5% error)
         // Rescales magnitude via << fft_shifts to restore original loudness!

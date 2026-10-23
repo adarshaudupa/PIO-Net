@@ -82,6 +82,7 @@ static uint32_t core1_stack[1024];
 
 static void telemetry_core1(void) {
     uint32_t prev_words = 0, prev_ones = 0;
+    static uint32_t last_density_permille = 500;
     while (1) {
         sleep_ms(1000);
         uint32_t words   = stat_words;
@@ -91,7 +92,10 @@ static void telemetry_core1(void) {
         prev_words = words;
         prev_ones  = ones;
 
-        uint32_t density_permille = d_words ? (uint32_t)(((uint64_t)d_ones * 1000ULL) / ((uint64_t)d_words * 32ULL)) : 0;
+        if (d_words > 0) {
+            last_density_permille = (uint32_t)(((uint64_t)d_ones * 1000ULL) / ((uint64_t)d_words * 32ULL));
+        }
+        uint32_t density_permille = last_density_permille;
         uint32_t lat_ms_int = bench_latency_us / 1000;
         uint32_t lat_ms_dec = (bench_latency_us % 1000) / 100;
         uint32_t pio1_pc = pio1->sm[0].addr;
@@ -216,6 +220,7 @@ int main(void)
         // Task 4: When pio1_triggered fires:
         // 1. Acknowledge trigger and turn on the status LED
         pio1_triggered = false;
+        irq_set_enabled(PIO1_IRQ_0, false); // Mask PIO1 interrupt while CPU is capturing & processing
         gpio_put(PIONET_LED_PIN, 1);
         printf("\n>>> [STAGE-1 WAKE] PIO1 Hardware Matched Filter Fired! Waking CPU!\n");
 
@@ -241,10 +246,12 @@ int main(void)
                 to_take = STAGE2_TOTAL_SAMPLES - samples_captured;
             }
 
+            uint32_t buf_ones = 0;
             for (int s = 0; s < to_take; s++) {
                 uint32_t w0 = buf[s * 2];
                 uint32_t w1 = buf[s * 2 + 1];
                 int32_t ones = __builtin_popcount(w0) + __builtin_popcount(w1);
+                buf_ones += ones;
                 // 64x boxcar popcount decimation: ones is in [0, 64], center is 32
                 int32_t x = (ones - 32) << 10;
                 // 1st-order IIR DC blocker filter
@@ -258,6 +265,7 @@ int main(void)
             samples_captured += to_take;
 
             stat_words += BUF_WORDS;
+            stat_ones  += buf_ones;
             buf_state[proc] = 0;
 
             uint32_t irq_state = save_and_disable_interrupts();
@@ -303,17 +311,30 @@ int main(void)
                CLASS_NAMES[pred], pred, (double)score, CLASS_NAMES[second_pred], (double)second_score,
                (unsigned long)feat_lat, (unsigned long)inf_lat);
 
-        if (pred == 0 && score > 2.0f) {
+        float margin = score - second_score;
+        bool confirmed = (pred == 0 && score >= 1.20f && margin >= 0.40f);
+
+        if (confirmed) {
             printf("***************************************************\n");
             printf("   🎉 [WAKEWORD DETECTED]: 'YES'! ACTIVATING CPU!   \n");
+            printf("   (Score: %.2f, Runner-up '%s': %.2f, Margin: +%.2f)\n",
+                   (double)score, CLASS_NAMES[second_pred], (double)second_score, (double)margin);
             printf("***************************************************\n");
             sleep_ms(1000); // Hold status LED on for 1.0 second on confirmed wakeword
         } else {
-            printf("    [REJECTED]: '%s' is not 'yes'. Returning to sleep.\n", CLASS_NAMES[pred]);
+            if (pred == 0) {
+                printf("    [REJECTED]: 'yes' candidate rejected (score: %.2f < 1.20 or margin: +%.2f < 0.40). Returning to sleep.\n",
+                       (double)score, (double)margin);
+            } else {
+                printf("    [REJECTED]: Predicted '%s' (score: %.2f, margin: +%.2f) is not wakeword 'yes'. Returning to sleep.\n",
+                       CLASS_NAMES[pred], (double)score, (double)margin);
+            }
             sleep_ms(200);
         }
 
         gpio_put(PIONET_LED_PIN, 0);
-        pio1_triggered = false; // Acknowledge and clear any spurious interrupts during processing
+        pio1_hw->irq = 1u; // Clear any pending hardware flag during processing
+        pio1_triggered = false;
+        irq_set_enabled(PIO1_IRQ_0, true); // Re-arm hardware interrupt for sleep
     }
 }

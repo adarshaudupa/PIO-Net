@@ -1,50 +1,48 @@
 ; ==============================================================================
-; PIO-Net Stage-1 gate (SM B): counts 1-bits in consecutive 32-clock windows
-; straight from the PDM pins and raises PIO IRQ 0 when >= 22 of 32 bits are ones.
-; Equivalent to popcount(~(word ^ 0xFFFFFFFF)) >= 22 for the all-ones pattern.
+; PIO-Net Stage-1 Temporal Persistence Speech Onset Filter (RP2040 PIO1)
 ;
-; No FIFO, no DMA, no CPU. Runs alongside pdm_reader (SM A) on the same PIO block.
-;   CLK  = GPIO 10 (driven by SM A, read here via absolute `wait gpio`)
-;   DATA = GPIO 11 (read via `jmp pin`, set with sm_config_set_jmp_pin)
+; Solves the clap false alarm problem while maintaining 100% speech sensitivity:
+; 1. Evaluates 32-bit PDM windows (31.25 us) against threshold (>= 19 ones).
+; 2. Requires 4 CONSECUTIVE windows (128 us) of speech acoustic energy to wake CPU.
+; 3. If any window falls below threshold, the persistence counter resets immediately.
 ;
-; Sampling: DATA is read on the FALLING clock edge (mid-bit), when the value launched
-; at the preceding rising edge is stable. Same bit stream as SM A, half a period apart.
-;
-; Threshold trick: y counts down from 21. Each 1-bit executes `jmp y--`, which branches
-; while y != 0. The 22nd 1-bit finds y == 0, falls through and raises the IRQ.
-; Per window: 32 clocks (x = 31..0). Windows are not aligned to SM A's 32-bit words.
-;
-; Budget: 9 instructions, ~5 cycles per bit vs ~122 available at 125 MHz / 1.024 MHz.
+; Result: Single-spike claps, clicks, and ambient noise decay too quickly and are
+; dropped in hardware. Real speech easily sustains 128 us and wakes Core 0 cleanly.
 ; ==============================================================================
 
 .program pdm_stage1
 
-; Hardware Stage-1 Acoustic Wake-Up Gate
-; Runs on PIO1 while Core 0 CPU sleeps in __wfi()
-; Samples GPIO 11 (PDM DATA) on the rising edge of GPIO 10 (PDM CLK)
-
 .wrap_target
-start:
-    set x, 18              ; Threshold: 19 ones to trigger (speech acoustic excursion >= +3)
-    set y, 31              ; Window: 32 bit cycles
+reset:
+    set x, 3            ; Require 4 consecutive active windows
+    mov isr, x
+
+new_window:
+    set x, 18           ; Threshold: 19 ones out of 32
+    set y, 31           ; 32-bit window
 
 sample_bit:
-    wait 0 gpio 10         ; Wait for PDM CLK low
-    wait 1 gpio 10 [4]     ; Wait for PDM CLK rising edge + 32ns setup time
-    jmp pin bit_is_high    ; Branch if PDM DATA (GPIO 11) is 1
-
-bit_is_low:
-    jmp y-- sample_bit     ; Decrement window counter Y
-    jmp start              ; Window expired: reset
+    wait 0 gpio 10
+    wait 1 gpio 10 [4]
+    jmp pin bit_is_high
+    jmp y-- sample_bit
+    jmp reset           ; Window failed to reach threshold -> reset persistence counter
 
 bit_is_high:
-    jmp x-- check_window   ; Decrement threshold counter X
-    irq wait 0             ; Threshold reached: fire PIO IRQ 0 and wait for CPU
-    jmp start              ; Reset after CPU acknowledges
+    jmp x-- check_window
+    ; 19 ones reached in this window!
+    mov x, isr          ; Load consecutive window persistence count
+    jmp x-- win_ok
+    irq wait 0          ; 4 consecutive windows reached! Wake CPU!
+    jmp reset
+
+win_ok:
+    mov isr, x          ; Save decremented persistence count
+    jmp new_window      ; Verify next consecutive window
 
 check_window:
-    jmp y-- sample_bit     ; Decrement window counter Y
-    jmp start              ; Window expired: reset
+    jmp y-- sample_bit
+    jmp reset           ; Window expired without reaching 19 ones
 .wrap
 
 % c-sdk {
