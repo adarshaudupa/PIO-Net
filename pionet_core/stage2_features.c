@@ -98,7 +98,7 @@ static void fft512_q15(int16_t *real, int16_t *imag) {
     }
 }
 
-void stage2_extract_spectrogram(const int16_t *audio_pcm, int8_t *out_spec) {
+void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
     if (!initialized) {
         stage2_features_init();
     }
@@ -172,12 +172,8 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, int8_t *out_spec) {
     float std_dev = sqrtf(sum_sq / (float)total_elements) + 1e-6f;
     if (std_dev < 1.0f) std_dev = 1.0f;
 
-    // Quantize to INT8: normalized * 32.0, clamped to [-128, 127]
+    // Output normalized float Mel-spectrogram directly (exact PyTorch contract)
     for (int i = 0; i < total_elements; i++) {
-        float normalized = (mel_matrix[i] - mean) / std_dev;
-        int32_t q = (int32_t)roundf(normalized * 32.0f);
-        if (q > 127) q = 127;
-        if (q < -128) q = -128;
-        out_spec[i] = (int8_t)q;
+        out_spec[i] = (mel_matrix[i] - mean) / std_dev;
     }
 }

@@ -192,7 +192,7 @@ int main(void)
     stage2_features_init();
 
     // Dry-run Stage-2 inference benchmark
-    static int8_t dummy_input[39 * 16] = {0};
+    static float dummy_input[39 * 16] = {0.0f};
     uint32_t t0 = time_us_32();
     bench_pred = stage2_classify(dummy_input);
     bench_latency_us = time_us_32() - t0;
@@ -381,7 +381,7 @@ int main(void)
                 capture_countdown = -1;
 
                 static int16_t linear_pcm[AUDIO_RING_SAMPLES];
-                static int8_t  spectrogram[STAGE2_NUM_FRAMES * STAGE2_NUM_MELS];
+                static float   spectrogram[STAGE2_NUM_FRAMES * STAGE2_NUM_MELS];
                 uint32_t tail = audio_ring_head;
                 for (int i = 0; i < AUDIO_RING_SAMPLES; i++) {
                     linear_pcm[i] = audio_ring[(tail + i) % AUDIO_RING_SAMPLES];
@@ -393,7 +393,8 @@ int main(void)
 
                 gpio_put(22, 1);
                 uint32_t t_inf = time_us_32();
-                int8_t pred = stage2_classify((const int8_t *)spectrogram);
+                int8_t pred = stage2_classify(spectrogram);
+                float score = stage2_get_last_score();
                 uint32_t inf_lat = time_us_32() - t_inf;
                 gpio_put(22, 0);
 
@@ -401,8 +402,8 @@ int main(void)
                 bench_latency_us = inf_lat;
                 stat_triggers++;
 
-                printf(">>> [STAGE-2 INFER] Predicted: '%s' (class %d) | Feat: %lu us, Infer: %lu us\n",
-                       CLASS_NAMES[pred], (int)pred, (unsigned long)feat_lat, (unsigned long)inf_lat);
+                printf(">>> [STAGE-2 INFER] Predicted: '%s' (class %d, score: %.2f) | Feat: %lu us, Infer: %lu us\n",
+                       CLASS_NAMES[pred], (int)pred, (double)score, (unsigned long)feat_lat, (unsigned long)inf_lat);
 
                 if (pred == 0) {
                     // TARGET KEYWORD "yes" DETECTED!

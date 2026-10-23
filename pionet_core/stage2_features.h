@@ -22,10 +22,10 @@
 void stage2_features_init(void);
 
 /**
- * @brief Extracts [39 x 16] INT8 Mel-spectrogram from 1.0 second of 16 kHz PCM audio.
+ * @brief Extracts [39 x 16] float Mel-spectrogram from 1.0 second of 16 kHz PCM audio.
  * @param audio_pcm 16,000 int16_t PCM audio samples
- * @param out_spec  Output buffer for 39 x 16 = 624 int8_t spectrogram features
+ * @param out_spec  Output buffer for 39 x 16 = 624 float spectrogram features
  */
-void stage2_extract_spectrogram(const int16_t *audio_pcm, int8_t *out_spec);
+void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec);
 
 #endif // STAGE2_FEATURES_H
