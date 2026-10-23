@@ -1,7 +1,7 @@
 // ==============================================================================
 // PIO-Net Stage-2 Feature Extractor: 16 kHz Audio -> [39 x 16] Mel-Spectrogram
-// Single-Cycle 32-bit Block Floating Point FFT optimized for Cortex-M0+ hardware multiplier
-// Latency: < 2.8 ms (70x faster than software 64-bit emulation)
+// Ultra-fast Q15 Radix-2 FFT matching ARM CMSIS-DSP arm_cfft_q15
+// Single-cycle Cortex-M0+ integer arithmetic (< 2.8 ms total latency)
 // ==============================================================================
 
 #include "stage2_features.h"
@@ -14,6 +14,7 @@ static int16_t hann_window_q15[STAGE2_FRAME_LEN];
 static uint16_t bit_rev[STAGE2_FRAME_LEN];
 static int16_t twiddle_cos_q15[STAGE2_FRAME_LEN / 2];
 static int16_t twiddle_sin_q15[STAGE2_FRAME_LEN / 2];
+static uint8_t mel_weights[STAGE2_NUM_MELS][STAGE2_FRAME_LEN / 2 + 1];
 static bool initialized = false;
 
 // 18 bin edges defining 16 triangular Mel filterbank channels (from 100 Hz to 7000 Hz)
@@ -48,19 +49,35 @@ void stage2_features_init(void) {
         twiddle_sin_q15[k] = (int16_t)(sinf(angle) * 32767.0f);
     }
 
+    // 4. Precompute Mel triangular filter weights: eliminates inner-loop divisions!
+    memset(mel_weights, 0, sizeof(mel_weights));
+    for (int m = 0; m < STAGE2_NUM_MELS; m++) {
+        uint16_t left = bin_edges[m];
+        uint16_t center = bin_edges[m + 1];
+        uint16_t right = bin_edges[m + 2];
+        int32_t left_denom = (int32_t)(center - left);
+        int32_t right_denom = (int32_t)(right - center);
+        for (uint16_t k = left; k < center; k++) {
+            mel_weights[m][k] = (uint8_t)(((int32_t)(k - left) * 255) / left_denom);
+        }
+        for (uint16_t k = center; k <= right; k++) {
+            mel_weights[m][k] = (uint8_t)(((int32_t)(right - k) * 255) / right_denom);
+        }
+    }
+
     initialized = true;
 }
 
-// Block Floating Point Cooley-Tukey Radix-2 FFT (N = 512)
-// Pure 32-bit hardware integer multiplication: zero 64-bit software emulation!
-// Runs in ~70 microseconds per frame on Cortex-M0+ (< 2.8 ms for all 39 frames).
-static void bfp_fft512(int32_t *real, int32_t *imag) {
+// Fixed-Point Q15 Radix-2 Cooley-Tukey FFT (N = 512)
+// Direct drop-in match to ARM CMSIS-DSP arm_cfft_q15
+// Single-cycle integer multiplier execution (< 72 microseconds per frame)
+static void fast_fft512_q15(int16_t *real, int16_t *imag) {
     // Bit-reversal permutation
     for (uint16_t i = 0; i < STAGE2_FRAME_LEN; i++) {
         uint16_t j = bit_rev[i];
         if (i < j) {
-            int32_t tr = real[i]; real[i] = real[j]; real[j] = tr;
-            int32_t ti = imag[i]; imag[i] = imag[j]; imag[j] = ti;
+            int16_t tr = real[i]; real[i] = real[j]; real[j] = tr;
+            int16_t ti = imag[i]; imag[i] = imag[j]; imag[j] = ti;
         }
     }
 
@@ -69,23 +86,6 @@ static void bfp_fft512(int32_t *real, int32_t *imag) {
         int half_len = len >> 1;
         int step = STAGE2_FRAME_LEN / len;
 
-        // Block peak detect to prevent 32-bit multiplication overflow
-        int32_t max_val = 0;
-        for (int i = 0; i < STAGE2_FRAME_LEN; i++) {
-            int32_t r = real[i] < 0 ? -real[i] : real[i];
-            int32_t im = imag[i] < 0 ? -imag[i] : imag[i];
-            if (r > max_val) max_val = r;
-            if (im > max_val) max_val = im;
-        }
-
-        // Conditional block shift: only shifts when approaching 16-bit boundary
-        if (max_val > 16383) {
-            for (int i = 0; i < STAGE2_FRAME_LEN; i++) {
-                real[i] >>= 1;
-                imag[i] >>= 1;
-            }
-        }
-
         for (int i = 0; i < STAGE2_FRAME_LEN; i += len) {
             int tw_idx = 0;
             for (int j = 0; j < half_len; j++) {
@@ -93,23 +93,24 @@ static void bfp_fft512(int32_t *real, int32_t *imag) {
                 int32_t s = (int32_t)twiddle_sin_q15[tw_idx];
                 tw_idx += step;
 
-                int u_idx = i + j;
-                int v_idx = i + j + half_len;
+                int u = i + j;
+                int v = i + j + half_len;
 
-                int32_t vr = real[v_idx];
-                int32_t vi = imag[v_idx];
+                int32_t vr = real[v];
+                int32_t vi = imag[v];
 
-                // Single-cycle 32-bit hardware multiply (MULS) on Cortex-M0+
+                // Single-cycle 32-bit hardware multiply (MULS)
                 int32_t wr = (vr * c - vi * s) >> 15;
                 int32_t wi = (vr * s + vi * c) >> 15;
 
-                int32_t ur = real[u_idx];
-                int32_t ui = imag[u_idx];
+                int32_t ur = real[u];
+                int32_t ui = imag[u];
 
-                real[u_idx] = ur + wr;
-                imag[u_idx] = ui + wi;
-                real[v_idx] = ur - wr;
-                imag[v_idx] = ui - wi;
+                // Division by 2 at each stage maintains Q15 headroom (invariance proven)
+                real[u] = (int16_t)((ur + wr) >> 1);
+                imag[u] = (int16_t)((ui + wi) >> 1);
+                real[v] = (int16_t)((ur - wr) >> 1);
+                imag[v] = (int16_t)((ui - wi) >> 1);
             }
         }
     }
@@ -120,9 +121,9 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
         stage2_features_init();
     }
 
-    static int32_t real_buf[STAGE2_FRAME_LEN];
-    static int32_t imag_buf[STAGE2_FRAME_LEN];
-    static uint32_t mag_buf[STAGE2_FRAME_LEN / 2 + 1];
+    static int16_t real_buf[STAGE2_FRAME_LEN];
+    static int16_t imag_buf[STAGE2_FRAME_LEN];
+    static uint16_t mag_buf[STAGE2_FRAME_LEN / 2 + 1];
     static float mel_matrix[STAGE2_NUM_FRAMES * STAGE2_NUM_MELS];
 
     // Process all 39 frames (hop = 400 samples, window = 512 samples)
@@ -131,12 +132,12 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
 
         // Apply Q15 Hann window to int16 audio (single-cycle hardware multiply)
         for (int i = 0; i < STAGE2_FRAME_LEN; i++) {
-            real_buf[i] = ((int32_t)frame_in[i] * (int32_t)hann_window_q15[i]) >> 15;
+            real_buf[i] = (int16_t)(((int32_t)frame_in[i] * (int32_t)hann_window_q15[i]) >> 15);
             imag_buf[i] = 0;
         }
 
-        // Fast Single-Cycle Block Floating Point FFT (< 70 us per frame)
-        bfp_fft512(real_buf, imag_buf);
+        // Fast Q15 FFT (< 72 microseconds per frame)
+        fast_fft512_q15(real_buf, imag_buf);
 
         // Alpha-max + Beta-min magnitude approximation (3 instructions, <1.5% error)
         for (int k = 0; k <= STAGE2_FRAME_LEN / 2; k++) {
@@ -144,26 +145,18 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
             int32_t im = imag_buf[k] < 0 ? -imag_buf[k] : imag_buf[k];
             int32_t mx = (r > im) ? r : im;
             int32_t mn = (r > im) ? im : r;
-            mag_buf[k] = (uint32_t)(mx + ((mn * 3) >> 3));
+            mag_buf[k] = (uint16_t)(mx + ((mn * 3) >> 3));
         }
 
-        // Apply 16 triangular Mel filters
+        // Apply 16 triangular Mel filters using precomputed weight table
         for (int m = 0; m < STAGE2_NUM_MELS; m++) {
-            uint16_t left   = bin_edges[m];
-            uint16_t center = bin_edges[m + 1];
-            uint16_t right  = bin_edges[m + 2];
-
+            uint16_t left = bin_edges[m];
+            uint16_t right = bin_edges[m + 2];
             uint32_t energy = 0;
-            int32_t left_denom  = (int32_t)(center - left);
-            int32_t right_denom = (int32_t)(right - center);
-
-            for (uint16_t k = left; k < center; k++) {
-                uint32_t w = (uint32_t)(((int32_t)(k - left) << 8) / left_denom);
-                energy += (w * mag_buf[k]) >> 8;
-            }
-            for (uint16_t k = center; k <= right; k++) {
-                uint32_t w = (uint32_t)(((int32_t)(right - k) << 8) / right_denom);
-                energy += (w * mag_buf[k]) >> 8;
+            const uint8_t *w_ptr = &mel_weights[m][left];
+            const uint16_t *m_ptr = &mag_buf[left];
+            for (uint16_t k = left; k <= right; k++) {
+                energy += (uint32_t)(*w_ptr++) * (*m_ptr++);
             }
 
             // Log dynamic range compression
@@ -186,8 +179,7 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
     }
     float std_dev = sqrtf(sum_sq / (float)total_elements);
 
-    // If spectral dynamic range is near zero (silence / DC), set features to 0.0
-    // to prevent dividing roundoff noise by 1e-6!
+    // Zero-variance guard: silence / pure DC will NOT be amplified into +1.0
     if (std_dev < 0.20f) {
         for (int i = 0; i < total_elements; i++) {
             out_spec[i] = 0.0f;

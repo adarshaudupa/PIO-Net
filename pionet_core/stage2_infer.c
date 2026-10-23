@@ -2,10 +2,20 @@
 #include "model_data.h"
 #include <stdio.h>
 
-static float last_pred_score = 0.0f;
+static float  last_pred_score = 0.0f;
+static float  last_second_score = 0.0f;
+static int8_t last_second_class = 0;
 
 float stage2_get_last_score(void) {
     return last_pred_score;
+}
+
+int8_t stage2_get_second_class(void) {
+    return last_second_class;
+}
+
+float stage2_get_second_score(void) {
+    return last_second_score;
 }
 
 int8_t stage2_classify(const float *in) {
@@ -154,6 +164,9 @@ int8_t stage2_classify(const float *in) {
     // 9. Fully Connected Classifier: [32] -> 12 class logits
     int8_t best_class = 0;
     int32_t max_logit = -2147483647;
+    int8_t second_class = 0;
+    int32_t second_logit = -2147483647;
+
     for (int cl = 0; cl < 12; cl++) {
         int32_t acc = fc_biases[cl];
         const int16_t *w_cl = &fc_weights[cl * 32];
@@ -161,11 +174,18 @@ int8_t stage2_classify(const float *in) {
             acc += (pooled[i] * (int32_t)w_cl[i]) >> 12;
         }
         if (acc > max_logit) {
+            second_logit = max_logit;
+            second_class = best_class;
             max_logit = acc;
             best_class = (int8_t)cl;
+        } else if (acc > second_logit) {
+            second_logit = acc;
+            second_class = (int8_t)cl;
         }
     }
 
     last_pred_score = (float)max_logit / 256.0f;
+    last_second_score = (float)second_logit / 256.0f;
+    last_second_class = second_class;
     return best_class;
 }

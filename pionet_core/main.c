@@ -281,7 +281,7 @@ int main(void)
             uint32_t w0 = buf[s * 2];
             uint32_t w1 = buf[s * 2 + 1];
             int32_t ones = __builtin_popcount(w0) + __builtin_popcount(w1);
-            int32_t x = (ones - (frame_dc >> 3)) << 13; // scale to 16-bit PCM (fill full dynamic range)
+            int32_t x = (ones - (frame_dc >> 3)) << 10; // scale to 16-bit PCM (fill full dynamic range without saturation)
             int32_t y = x - dc_filter_x + ((dc_filter_y * 32600) >> 15);
             dc_filter_x = x;
             dc_filter_y = y;
@@ -395,6 +395,8 @@ int main(void)
                 uint32_t t_inf = time_us_32();
                 int8_t pred = stage2_classify(spectrogram);
                 float score = stage2_get_last_score();
+                int8_t second_pred = stage2_get_second_class();
+                float second_score = stage2_get_second_score();
                 uint32_t inf_lat = time_us_32() - t_inf;
                 gpio_put(22, 0);
 
@@ -402,8 +404,9 @@ int main(void)
                 bench_latency_us = inf_lat;
                 stat_triggers++;
 
-                printf(">>> [STAGE-2 INFER] Predicted: '%s' (class %d, score: %.2f) | Feat: %lu us, Infer: %lu us\n",
-                       CLASS_NAMES[pred], (int)pred, (double)score, (unsigned long)feat_lat, (unsigned long)inf_lat);
+                printf(">>> [STAGE-2 INFER] Top-1: '%s' (score: %.2f) | Runner-up: '%s' (score: %.2f) | Feat: %lu us, Infer: %lu us\n",
+                       CLASS_NAMES[pred], (double)score, CLASS_NAMES[second_pred], (double)second_score,
+                       (unsigned long)feat_lat, (unsigned long)inf_lat);
 
                 if (pred == 0 && score > 0.8f) {
                     // TARGET KEYWORD "yes" DETECTED!
