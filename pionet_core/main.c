@@ -413,6 +413,7 @@ int main(void)
                 } else {
                     printf("    [REJECTED]: '%s' is not 'yes'. Going back to sleep.\n", CLASS_NAMES[pred]);
                 }
+                cooldown = 20; // Debounce speech tail and reverb (~320 ms)
             }
         } else if (led_hold > 0) {
             led_hold--;
