@@ -34,7 +34,9 @@ endif ()
 add_executable(pionet_core
         model_data.h
         stage2_infer.h
-        stage2_infer.c)
+        stage2_infer.c
+        stage2_features.h
+        stage2_features.c)
 
 # Generate C header from PIO assembly
 pico_generate_pio_header(pionet_core ${CMAKE_CURRENT_LIST_DIR}/pdm_reader.pio)

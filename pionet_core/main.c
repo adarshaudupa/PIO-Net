@@ -25,6 +25,7 @@
 #include "hardware/sync.h"
 #include "pdm_reader.pio.h"
 #include "stage2_infer.h"
+#include "stage2_features.h"
 #include "pdm_stage1.pio.h"
 
 #ifndef PIONET_TELEMETRY
@@ -44,6 +45,18 @@ static volatile uint8_t  dma_filling  = 0;
 static volatile bool     dma_stalled  = false;
 static volatile uint32_t overrun_count = 0;
 static uint32_t led_hold = 0;
+
+// 12-Class MLPerf Tiny keyword labels
+static const char *CLASS_NAMES[12] = {
+    "yes", "no", "stop", "go", "left", "right",
+    "on", "off", "up", "down", "_silence_", "_unknown_"
+};
+
+#define AUDIO_RING_SAMPLES 16000
+static int16_t audio_ring[AUDIO_RING_SAMPLES];
+static uint32_t audio_ring_head = 0;
+static int32_t dc_filter_x = 0;
+static int32_t dc_filter_y = 0;
 
 // Inter-core telemetry statistics
 static volatile uint32_t stat_words       = 0;
@@ -174,11 +187,15 @@ int main(void)
 
     dma_channel_start(dma_chan);
     printf("[PIO-Net] DMA armed, capturing to double buffer...\n");
+
+    // Initialize Stage-2 Mel-spectrogram feature extractor
+    stage2_features_init();
+
     // Dry-run Stage-2 inference benchmark
     static int8_t dummy_input[39 * 16] = {0};
     uint32_t t0 = time_us_32();
     bench_pred = stage2_classify(dummy_input);
-    bench_latency_us = time_us_32() - t0;;
+    bench_latency_us = time_us_32() - t0;
 
     gpio_init(22);
     gpio_set_dir(22, GPIO_OUT);
@@ -205,13 +222,14 @@ int main(void)
     // -------------------------------------------------------------------------
     // Adaptive DC baseline & noise floor tracking
     // -------------------------------------------------------------------------
-    static int32_t  dc_center_q8    = (265 << 8); // Sub-bit DC baseline in Q8 format
-    static int32_t  dc_center       = 265;        // DC ones-per-sub-block
-    static uint32_t noise_floor     = 0;          // Adaptive silence energy baseline
-    static uint32_t warmup_accum    = 0;          // Accumulator for warmup energy
-    static uint32_t warmup_ones     = 0;          // Accumulator for warmup ones
-    static uint8_t  warmup          = 30;         // ~480 ms calibration window at boot
-    static uint8_t  cooldown        = 0;          // Post-trigger debounce
+    static int32_t  dc_center_q8       = (265 << 8); // Sub-bit DC baseline in Q8 format
+    static int32_t  dc_center          = 265;        // DC ones-per-sub-block
+    static uint32_t noise_floor        = 0;          // Adaptive silence energy baseline
+    static uint32_t warmup_accum       = 0;          // Accumulator for warmup energy
+    static uint32_t warmup_ones        = 0;          // Accumulator for warmup ones
+    static uint8_t  warmup             = 30;         // ~480 ms calibration window at boot
+    static uint8_t  cooldown           = 0;          // Post-trigger debounce
+    static int16_t  capture_countdown  = -1;         // Countdown frames to capture full word
 
     while (1) {
         uint8_t proc = 0xFF;
@@ -245,6 +263,27 @@ int main(void)
             int32_t dev = (int32_t)block_ones - dc_center;
             if (dev < 0) dev = -dev;
             buf_energy += (uint32_t)dev;
+        }
+
+        // ---------------------------------------------------------------------
+        // Decimate 512 PDM words (16,384 bits) into 256 PCM audio samples (16 kHz)
+        // OSR = 64: 2 words (64 bits) per sample with 1st-order IIR DC blocker
+        // ---------------------------------------------------------------------
+        for (int s = 0; s < 256; s++) {
+            uint32_t w0 = buf[s * 2];
+            uint32_t w1 = buf[s * 2 + 1];
+            int32_t ones = __builtin_popcount(w0) + __builtin_popcount(w1);
+            int32_t x = (ones - (dc_center >> 3)) << 9; // scale to 16-bit PCM
+            int32_t y = x - dc_filter_x + ((dc_filter_y * 32600) >> 15);
+            dc_filter_x = x;
+            dc_filter_y = y;
+            if (y > 32767)  y = 32767;
+            if (y < -32768) y = -32768;
+            audio_ring[audio_ring_head] = (int16_t)y;
+            audio_ring_head++;
+            if (audio_ring_head >= AUDIO_RING_SAMPLES) {
+                audio_ring_head = 0;
+            }
         }
 
         if (buf_energy > stat_peak_energy) {
@@ -323,19 +362,58 @@ int main(void)
         if (cooldown > 0) cooldown--;
 
         // Stage-1 Acoustic Energy Gate (adaptive threshold + PIO1 hardware trigger)
-        if ((buf_energy > adaptive_threshold || pio1_triggered) && cooldown == 0) {
+        if ((buf_energy > adaptive_threshold || pio1_triggered) && cooldown == 0 && capture_countdown < 0) {
             pio1_triggered = false;
-            printf(">>> [STAGE-1 WAKE] Speech Detected! Energy: %lu (floor: %lu, thresh: %lu)\n",
+            printf(">>> [STAGE-1 WAKE] Speech Onset Detected! Energy: %lu (floor: %lu, thresh: %lu)\n",
                    (unsigned long)buf_energy,
                    (unsigned long)noise_floor,
                    (unsigned long)adaptive_threshold);
-            gpio_put(22, 1);
-            bench_pred = stage2_classify((const int8_t *)dummy_input);
-            gpio_put(22, 0);
-            stat_triggers++;
-            led_hold = 20;
-            gpio_put(PIONET_LED_PIN, 1);
-            cooldown = 4;  // Skip 4 frames (~64 ms) to debounce speech
+            // Collect next ~448 ms (28 buffers of 16 ms) to capture the complete utterance
+            capture_countdown = 28;
+            cooldown = 35; // Debounce during capture
+        }
+
+        // Post-onset utterance capture & Stage-2 Classifier forward pass
+        if (capture_countdown > 0) {
+            capture_countdown--;
+            if (capture_countdown == 0) {
+                capture_countdown = -1;
+
+                static int16_t linear_pcm[AUDIO_RING_SAMPLES];
+                static int8_t  spectrogram[STAGE2_NUM_FRAMES * STAGE2_NUM_MELS];
+                uint32_t tail = audio_ring_head;
+                for (int i = 0; i < AUDIO_RING_SAMPLES; i++) {
+                    linear_pcm[i] = audio_ring[(tail + i) % AUDIO_RING_SAMPLES];
+                }
+
+                uint32_t t_feat = time_us_32();
+                stage2_extract_spectrogram(linear_pcm, spectrogram);
+                uint32_t feat_lat = time_us_32() - t_feat;
+
+                gpio_put(22, 1);
+                uint32_t t_inf = time_us_32();
+                int8_t pred = stage2_classify((const int8_t *)spectrogram);
+                uint32_t inf_lat = time_us_32() - t_inf;
+                gpio_put(22, 0);
+
+                bench_pred = pred;
+                bench_latency_us = inf_lat;
+                stat_triggers++;
+
+                printf(">>> [STAGE-2 INFER] Predicted: '%s' (class %d) | Feat: %lu us, Infer: %lu us\n",
+                       CLASS_NAMES[pred], (int)pred, (unsigned long)feat_lat, (unsigned long)inf_lat);
+
+                if (pred == 0) {
+                    // TARGET KEYWORD "yes" DETECTED!
+                    printf("***************************************************\n");
+                    printf("   🎉 [WAKEWORD DETECTED]: 'YES'! ACTIVATING CPU!   \n");
+                    printf("***************************************************\n");
+                    gpio_put(PIONET_LED_PIN, 1);
+                    led_hold = 60; // Hold LED on for ~1.0 second (60 * 16 ms)
+                } else {
+                    printf("    [REJECTED]: '%s' is not 'yes'. Going back to sleep.\n", CLASS_NAMES[pred]);
+                }
+            }
         } else if (led_hold > 0) {
             led_hold--;
             if (led_hold == 0) {
