@@ -281,7 +281,7 @@ int main(void)
             uint32_t w0 = buf[s * 2];
             uint32_t w1 = buf[s * 2 + 1];
             int32_t ones = __builtin_popcount(w0) + __builtin_popcount(w1);
-            int32_t x = (ones - (frame_dc >> 3)) << 9; // scale to 16-bit PCM
+            int32_t x = (ones - (frame_dc >> 3)) << 13; // scale to 16-bit PCM (fill full dynamic range)
             int32_t y = x - dc_filter_x + ((dc_filter_y * 32600) >> 15);
             dc_filter_x = x;
             dc_filter_y = y;
@@ -405,13 +405,15 @@ int main(void)
                 printf(">>> [STAGE-2 INFER] Predicted: '%s' (class %d, score: %.2f) | Feat: %lu us, Infer: %lu us\n",
                        CLASS_NAMES[pred], (int)pred, (double)score, (unsigned long)feat_lat, (unsigned long)inf_lat);
 
-                if (pred == 0) {
+                if (pred == 0 && score > 0.8f) {
                     // TARGET KEYWORD "yes" DETECTED!
                     printf("***************************************************\n");
                     printf("   🎉 [WAKEWORD DETECTED]: 'YES'! ACTIVATING CPU!   \n");
                     printf("***************************************************\n");
                     gpio_put(PIONET_LED_PIN, 1);
                     led_hold = 60; // Hold LED on for ~1.0 second (60 * 16 ms)
+                } else if (pred == 0) {
+                    printf("    [REJECTED]: 'yes' confidence marginal (score: %.2f <= 0.80). Going back to sleep.\n", (double)score);
                 } else {
                     printf("    [REJECTED]: '%s' is not 'yes'. Going back to sleep.\n", CLASS_NAMES[pred]);
                 }

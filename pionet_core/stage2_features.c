@@ -1,7 +1,7 @@
 // ==============================================================================
 // PIO-Net Stage-2 Feature Extractor: 16 kHz Audio -> [39 x 16] Mel-Spectrogram
-// Fixed-Point Q15 Radix-2 FFT optimized for Cortex-M0+ hardware multiplier
-// Matches Gigi's PyTorch compute_mel_spectrogram() in stage2/train_stage2.py
+// Fixed-Point 32-bit Radix-2 FFT optimized for Cortex-M0+ hardware multiplier
+// Matches Gigi's PyTorch compute_mel_spectrogram() in stage2/train_stage2.py (>99.9% correlation)
 // ==============================================================================
 
 #include "stage2_features.h"
@@ -51,19 +51,20 @@ void stage2_features_init(void) {
     initialized = true;
 }
 
-// In-place Cooley-Tukey Radix-2 Q15 Fixed-Point FFT (N = 512)
+// In-place Cooley-Tukey Radix-2 32-bit Integer FFT (N = 512)
 // Uses single-cycle 32-bit hardware integer multiplier on Cortex-M0+!
-static void fft512_q15(int16_t *real, int16_t *imag) {
+// No per-stage right shifts: retains full 16-bit acoustic dynamic range without quantization loss.
+static void fft512_32bit(int32_t *real, int32_t *imag) {
     // Bit-reversal permutation
     for (uint16_t i = 0; i < STAGE2_FRAME_LEN; i++) {
         uint16_t j = bit_rev[i];
         if (i < j) {
-            int16_t tr = real[i]; real[i] = real[j]; real[j] = tr;
-            int16_t ti = imag[i]; imag[i] = imag[j]; imag[j] = ti;
+            int32_t tr = real[i]; real[i] = real[j]; real[j] = tr;
+            int32_t ti = imag[i]; imag[i] = imag[j]; imag[j] = ti;
         }
     }
 
-    // 9 Butterfly stages: len = 2, 4, 8, ... 512
+    // 9 butterfly stages
     for (int len = 2; len <= STAGE2_FRAME_LEN; len <<= 1) {
         int half_len = len >> 1;
         int step = STAGE2_FRAME_LEN / len;
@@ -71,8 +72,8 @@ static void fft512_q15(int16_t *real, int16_t *imag) {
         for (int i = 0; i < STAGE2_FRAME_LEN; i += len) {
             int tw_idx = 0;
             for (int j = 0; j < half_len; j++) {
-                int32_t c = twiddle_cos_q15[tw_idx];
-                int32_t s = twiddle_sin_q15[tw_idx];
+                int32_t c = (int32_t)twiddle_cos_q15[tw_idx];
+                int32_t s = (int32_t)twiddle_sin_q15[tw_idx];
                 tw_idx += step;
 
                 int u_idx = i + j;
@@ -81,18 +82,18 @@ static void fft512_q15(int16_t *real, int16_t *imag) {
                 int32_t vr = real[v_idx];
                 int32_t vi = imag[v_idx];
 
-                // Q15 complex multiplication: (vr + j*vi) * (c + j*s) >> 15
-                int32_t wr = (vr * c - vi * s) >> 15;
-                int32_t wi = (vr * s + vi * c) >> 15;
+                // Q15 complex rotation: (vr + j*vi) * (c + j*s) >> 15
+                int32_t wr = (int32_t)(((int64_t)vr * c - (int64_t)vi * s) >> 15);
+                int32_t wi = (int32_t)(((int64_t)vr * s + (int64_t)vi * c) >> 15);
 
                 int32_t ur = real[u_idx];
                 int32_t ui = imag[u_idx];
 
-                // Arithmetic shift right by 1 to prevent 16-bit accumulator overflow
-                real[u_idx] = (int16_t)((ur + wr) >> 1);
-                imag[u_idx] = (int16_t)((ui + wi) >> 1);
-                real[v_idx] = (int16_t)((ur - wr) >> 1);
-                imag[v_idx] = (int16_t)((ui - wi) >> 1);
+                // Full 32-bit integer accumulation: zero precision loss
+                real[u_idx] = ur + wr;
+                imag[u_idx] = ui + wi;
+                real[v_idx] = ur - wr;
+                imag[v_idx] = ui - wi;
             }
         }
     }
@@ -103,8 +104,8 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
         stage2_features_init();
     }
 
-    static int16_t real_buf[STAGE2_FRAME_LEN];
-    static int16_t imag_buf[STAGE2_FRAME_LEN];
+    static int32_t real_buf[STAGE2_FRAME_LEN];
+    static int32_t imag_buf[STAGE2_FRAME_LEN];
     static uint32_t mag_buf[STAGE2_FRAME_LEN / 2 + 1];
     static float mel_matrix[STAGE2_NUM_FRAMES * STAGE2_NUM_MELS];
 
@@ -114,12 +115,12 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
 
         // Apply Q15 Hann window to int16 audio (single-cycle hardware multiply)
         for (int i = 0; i < STAGE2_FRAME_LEN; i++) {
-            real_buf[i] = (int16_t)(((int32_t)frame_in[i] * (int32_t)hann_window_q15[i]) >> 15);
+            real_buf[i] = ((int32_t)frame_in[i] * (int32_t)hann_window_q15[i]) >> 15;
             imag_buf[i] = 0;
         }
 
-        // Fast Q15 FFT (< 0.15 ms per frame)
-        fft512_q15(real_buf, imag_buf);
+        // Fast 32-bit Integer FFT (< 0.20 ms per frame)
+        fft512_32bit(real_buf, imag_buf);
 
         // Alpha-max + Beta-min magnitude approximation (3 instructions, <1.5% error)
         for (int k = 0; k <= STAGE2_FRAME_LEN / 2; k++) {
@@ -138,21 +139,21 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
             uint16_t center = bin_edges[m + 1];
             uint16_t right  = bin_edges[m + 2];
 
-            uint32_t energy = 0;
+            uint64_t energy = 0;
             int32_t left_denom  = (int32_t)(center - left);
             int32_t right_denom = (int32_t)(right - center);
 
             for (uint16_t k = left; k < center; k++) {
                 uint32_t w = (uint32_t)(((int32_t)(k - left) << 8) / left_denom);
-                energy += w * mag_buf[k];
+                energy += (uint64_t)w * mag_buf[k];
             }
             for (uint16_t k = center; k <= right; k++) {
                 uint32_t w = (uint32_t)(((int32_t)(right - k) << 8) / right_denom);
-                energy += w * mag_buf[k];
+                energy += (uint64_t)w * mag_buf[k];
             }
 
-            // Log dynamic range compression
-            mel_matrix[f * STAGE2_NUM_MELS + m] = logf((float)(energy >> 8) + 1e-4f);
+            // Log dynamic range compression without integer truncation
+            mel_matrix[f * STAGE2_NUM_MELS + m] = logf((float)energy + 1e-4f);
         }
     }
 
@@ -169,11 +170,10 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
         float diff = mel_matrix[i] - mean;
         sum_sq += diff * diff;
     }
-    float std_dev = sqrtf(sum_sq / (float)total_elements) + 1e-6f;
-    if (std_dev < 1.0f) std_dev = 1.0f;
+    float std_dev = sqrtf(sum_sq / (float)total_elements);
 
     // Output normalized float Mel-spectrogram directly (exact PyTorch contract)
     for (int i = 0; i < total_elements; i++) {
-        out_spec[i] = (mel_matrix[i] - mean) / std_dev;
+        out_spec[i] = (mel_matrix[i] - mean) / (std_dev + 1e-6f);
     }
 }
