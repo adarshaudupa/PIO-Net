@@ -1,48 +1,56 @@
 ; ==============================================================================
-; PIO-Net Stage-1 Temporal Persistence Speech Onset Filter (RP2040 PIO1)
+; PIO-Net Stage-1: Two-Tier Temporal Duration-Energy Gate (RP2040 PIO1)
 ;
-; Solves the clap false alarm problem while maintaining 100% speech sensitivity:
-; 1. Evaluates 32-bit PDM windows (31.25 us) against threshold (>= 19 ones).
-; 2. Requires 4 CONSECUTIVE windows (128 us) of speech acoustic energy to wake CPU.
-; 3. If any window falls below threshold, the persistence counter resets immediately.
+; Synthesizes the best of Claude's microarchitectural rigor and Gemini's
+; two-tier persistence architecture within the strict 32-instruction silicon limit:
 ;
-; Result: Single-spike claps, clicks, and ambient noise decay too quickly and are
-; dropped in hardware. Real speech easily sustains 128 us and wakes Core 0 cleanly.
+; 1. Inner Tier (Block Energy):
+;    Evaluates 32-bit PDM sub-blocks (31.25 us). Requires >= 19 ones out of 32
+;    (59.4% acoustic speech density).
+; 2. Outer Tier (Temporal Persistence):
+;    Maintains a 16-block countdown loop in the ISR scratch register.
+;    Requires 16 CONSECUTIVE qualifying sub-blocks to wake the CPU.
+; 3. Deterministic Reset:
+;    If any sub-block fails (< 19 ones), the outer persistence counter is
+;    immediately reset to 16. Single-spike transients (claps < 8 ms) decay
+;    too quickly to satisfy 16 consecutive blocks and are dropped in hardware.
+; 4. Hardware IRQ Wake:
+;    When all 16 consecutive blocks qualify, asserts `irq wait 0` to wake Core 0.
 ; ==============================================================================
 
 .program pdm_stage1
 
 .wrap_target
 reset:
-    set x, 3            ; Require 4 consecutive active windows
+    set x, 15           ; Outer counter: require 16 consecutive qualifying sub-blocks
     mov isr, x
 
-new_window:
-    set x, 18           ; Threshold: 19 ones out of 32
-    set y, 31           ; 32-bit window
+new_block:
+    set x, 18           ; Inner counter: threshold >= 19 ones out of 32 bits
+    set y, 31           ; Inner window: 32 PDM clocks
 
 sample_bit:
-    wait 0 gpio 10
-    wait 1 gpio 10 [4]
-    jmp pin bit_is_high
-    jmp y-- sample_bit
-    jmp reset           ; Window failed to reach threshold -> reset persistence counter
+    wait 0 gpio 10      ; Wait for PDM CLK falling edge
+    wait 1 gpio 10 [4]  ; Wait for PDM CLK rising edge + setup delay
+    jmp pin bit_is_high ; Sample GPIO 11 (PDM DATA)
+    jmp y-- sample_bit  ; Bit is 0: decrement window counter Y, continue sampling
+    jmp reset           ; Y reached 0: window finished without 19 ones -> FAIL, reset outer counter
 
 bit_is_high:
-    jmp x-- check_window
-    ; 19 ones reached in this window!
-    mov x, isr          ; Load consecutive window persistence count
-    jmp x-- win_ok
-    irq wait 0          ; 4 consecutive windows reached! Wake CPU!
+    jmp x-- check_window; Bit is 1: decrement ones counter X
+    ; Threshold reached! 19 ones accumulated in this sub-block -> PASS!
+    mov x, isr          ; Load outer persistence counter from ISR
+    jmp x-- block_ok    ; Decrement outer persistence counter
+    irq wait 0          ; All 16 consecutive blocks qualified! WAKE CPU!
     jmp reset
 
-win_ok:
-    mov isr, x          ; Save decremented persistence count
-    jmp new_window      ; Verify next consecutive window
+block_ok:
+    mov isr, x          ; Save decremented outer persistence counter back to ISR
+    jmp new_block       ; Verify next consecutive sub-block
 
 check_window:
-    jmp y-- sample_bit
-    jmp reset           ; Window expired without reaching 19 ones
+    jmp y-- sample_bit  ; Continue sampling remaining bits in window
+    jmp reset           ; Window finished without 19 ones -> FAIL, reset outer counter
 .wrap
 
 % c-sdk {

@@ -262,6 +262,11 @@ int main(void)
                 if (y < -32768) y = -32768;
                 pcm[samples_captured + s] = (int16_t)y;
             }
+#if PIONET_DEV_DUMP_PDM
+            for (int w = 0; w < to_take * 2; w++) {
+                printf("%08lx\n", (unsigned long)buf[w]);
+            }
+#endif
             samples_captured += to_take;
 
             stat_words += BUF_WORDS;
