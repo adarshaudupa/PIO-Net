@@ -344,7 +344,7 @@ int main(void)
             sleep_ms(1000); // Hold status LED on for 1.0 second on confirmed wakeword
         } else {
             if (pred == 0) {
-                printf("    [REJECTED]: 'yes' candidate rejected (score: %.2f < 1.20 or margin: +%.2f < 0.40). Returning to sleep.\n",
+                printf("    [REJECTED]: 'yes' candidate rejected (score: %.2f < 0.80 or margin: +%.2f < 0.30). Returning to sleep.\n",
                        (double)score, (double)margin);
             } else {
                 printf("    [REJECTED]: Predicted '%s' (score: %.2f, margin: +%.2f) is not wakeword 'yes'. Returning to sleep.\n",

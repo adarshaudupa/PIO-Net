@@ -159,24 +159,33 @@ int8_t stage2_classify(const int8_t *in) {
     }
 
     // 9. Fully Connected Classifier: [32] -> 12 class logits
-    int8_t best_class = 0;
-    int32_t max_logit = -2147483647;
-    int8_t second_class = 0;
-    int32_t second_logit = -2147483647;
-
+    int32_t logits[12];
     for (int cl = 0; cl < 12; cl++) {
         int32_t acc = fc_biases[cl];
         const int16_t *w_cl = &fc_weights[cl * 32];
         for (int i = 0; i < 32; i++) {
             acc += (pooled[i] * (int32_t)w_cl[i]) >> 12;
         }
-        if (acc > max_logit) {
-            second_logit = max_logit;
-            second_class = best_class;
-            max_logit = acc;
+        logits[cl] = acc;
+    }
+
+    // Top-1 search
+    int8_t best_class = 0;
+    int32_t max_logit = logits[0];
+    for (int cl = 1; cl < 12; cl++) {
+        if (logits[cl] > max_logit) {
+            max_logit = logits[cl];
             best_class = (int8_t)cl;
-        } else if (acc > second_logit) {
-            second_logit = acc;
+        }
+    }
+
+    // Runner-up search (strictly excludes best_class)
+    int8_t second_class = (best_class == 0) ? 1 : 0;
+    int32_t second_logit = logits[second_class];
+    for (int cl = 0; cl < 12; cl++) {
+        if (cl == best_class) continue;
+        if (logits[cl] > second_logit) {
+            second_logit = logits[cl];
             second_class = (int8_t)cl;
         }
     }
