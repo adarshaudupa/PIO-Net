@@ -252,7 +252,8 @@ int main(void)
                 int32_t ones = __builtin_popcount(w0) + __builtin_popcount(w1);
                 buf_ones += ones;
                 // 64x boxcar popcount decimation: ones is in [0, 64], center is 32
-                int32_t x = (ones - 32) << 10;
+                // Apply 4x digital gain (<< 12) to match standard 16-bit speech levels
+                int32_t x = (ones - 32) << 12;
                 // 1st-order IIR DC blocker filter
                 int32_t y = x - dc_filter_x + ((dc_filter_y * 32600) >> 15);
                 dc_filter_x = x;
@@ -320,6 +321,14 @@ int main(void)
             second_score = stage2_get_second_score();
             inf_lat = time_us_32() - t_inf;
             gpio_put(22, 0);
+
+            // Since Stage 1 hardware tripwire already established speech energy onset,
+            // if background noise floor (_silence_) took top-1 but a speech command was
+            // detected as runner-up with positive score, evaluate the speech hypothesis!
+            if (pred == 10 && second_pred < 10 && second_score >= 0.20f) {
+                pred = second_pred;
+                score = second_score;
+            }
         }
 
         bench_pred = pred;
