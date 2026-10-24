@@ -240,7 +240,7 @@ int main(void)
             buf_state[proc] = 2; // active processing
             uint32_t *buf = pdm_buf[proc];
 
-            int to_take = 256;
+            int to_take = BUF_WORDS / 2; // Exactly 128 PCM samples per 256 PDM words (64x decimation)
             if (samples_captured + to_take > STAGE2_TOTAL_SAMPLES) {
                 to_take = STAGE2_TOTAL_SAMPLES - samples_captured;
             }
@@ -268,7 +268,7 @@ int main(void)
 #endif
             samples_captured += to_take;
 
-            stat_words += BUF_WORDS;
+            stat_words += to_take * 2;
             stat_ones  += buf_ones;
             buf_state[proc] = 0;
 
@@ -332,7 +332,7 @@ int main(void)
                (unsigned long)feat_lat, (unsigned long)inf_lat);
 
         float margin = score - second_score;
-        bool confirmed = (pred == 0 && score >= 1.20f && margin >= 0.40f);
+        bool confirmed = (pred == 0 && (score >= 0.70f || (score >= 0.45f && margin >= 0.35f)));
 
         if (confirmed) {
             printf("***************************************************\n");
