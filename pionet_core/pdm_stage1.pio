@@ -22,11 +22,11 @@
 
 .wrap_target
 reset:
-    set x, 15           ; Outer counter: require 16 consecutive qualifying sub-blocks
+    set x, 7            ; Outer counter: require 8 consecutive qualifying sub-blocks (250 us)
     mov isr, x
 
 new_block:
-    set x, 18           ; Inner counter: threshold >= 19 ones out of 32 bits
+    set x, 17           ; Inner counter: threshold >= 18 ones out of 32 bits (56.25% density)
     set y, 31           ; Inner window: 32 PDM clocks
 
 sample_bit:

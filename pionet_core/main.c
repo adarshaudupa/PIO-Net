@@ -222,7 +222,6 @@ int main(void)
         pio1_triggered = false;
         irq_set_enabled(PIO1_IRQ_0, false); // Mask PIO1 interrupt while CPU is capturing & processing
         gpio_put(PIONET_LED_PIN, 1);
-        printf("\n>>> [STAGE-1 WAKE] PIO1 Hardware Matched Filter Fired! Waking CPU!\n");
 
         // 2. Decimate 1.0 second of incoming PDM audio into a 16,000-sample int16_t PCM buffer using 64x boxcar popcount
         static int16_t pcm[STAGE2_TOTAL_SAMPLES];
@@ -283,6 +282,8 @@ int main(void)
             restore_interrupts(irq_state);
         }
 
+        printf("\n>>> [STAGE-1 WAKE] PIO1 Hardware Matched Filter Fired! Waking CPU!\n");
+
         // 3. Pass the PCM buffer to stage2_extract_spectrogram(pcm, spec) to generate the [39 x 16] Mel-spectrogram
         static float spectrogram[STAGE2_NUM_FRAMES * STAGE2_NUM_MELS];
         uint32_t t_feat = time_us_32();
@@ -298,14 +299,28 @@ int main(void)
             spectrogram_int8[i] = (int8_t)val;
         }
 
-        gpio_put(22, 1);
-        uint32_t t_inf = time_us_32();
-        int8_t pred = stage2_classify(spectrogram_int8);
-        float score = stage2_get_last_score();
-        int8_t second_pred = stage2_get_second_class();
-        float second_score = stage2_get_second_score();
-        uint32_t inf_lat = time_us_32() - t_inf;
-        gpio_put(22, 0);
+        int8_t pred = 10;
+        float score = 0.0f;
+        int8_t second_pred = 11;
+        float second_score = 0.0f;
+        uint32_t inf_lat = 0;
+
+        float std_dev = stage2_features_get_last_std_dev();
+        if (std_dev < 0.20f) {
+            pred = 10; // _silence_
+            score = 0.0f;
+            second_pred = 11; // _unknown_
+            second_score = 0.0f;
+        } else {
+            gpio_put(22, 1);
+            uint32_t t_inf = time_us_32();
+            pred = stage2_classify(spectrogram_int8);
+            score = stage2_get_last_score();
+            second_pred = stage2_get_second_class();
+            second_score = stage2_get_second_score();
+            inf_lat = time_us_32() - t_inf;
+            gpio_put(22, 0);
+        }
 
         bench_pred = pred;
         bench_latency_us = inf_lat;
