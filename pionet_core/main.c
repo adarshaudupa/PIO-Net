@@ -33,9 +33,9 @@
 #define PIONET_TELEMETRY 1   // Set to 0 for bench power measurements
 #endif
 
-// Double buffers isolated to dedicated SRAM banks to prevent AHB bus contention
-static uint32_t __scratch_x("pdm_buf0") pdm_buf0[BUF_WORDS];
-static uint32_t __scratch_y("pdm_buf1") pdm_buf1[BUF_WORDS];
+// Double buffers isolated to dedicated SRAM banks to prevent AHB bus contention (2048-byte aligned for ring wrap)
+static uint32_t __scratch_x("pdm_buf0") __aligned(2048) pdm_buf0[BUF_WORDS];
+static uint32_t __scratch_y("pdm_buf1") __aligned(2048) pdm_buf1[BUF_WORDS];
 static uint32_t * const pdm_buf[2] = { pdm_buf0, pdm_buf1 };
 
 // buf_state: 0 = free (DMA write), 1 = full (CPU pending), 2 = active (CPU processing)
@@ -64,7 +64,7 @@ static volatile int8_t   bench_pred = 0;
 
 static int dma_chan;
 
-// DMA Interrupt Service Routine: double-buffers PDM stream safely
+// DMA Interrupt Service Routine: double-buffers PDM stream safely during capture
 static void dma_isr(void) {
     dma_hw->ints0 = 1u << dma_chan;
 
@@ -79,6 +79,58 @@ static void dma_isr(void) {
         dma_stalled = true;
         overrun_count++;
     }
+}
+
+// Background free-running ring DMA: keeps PIO0 draining and PDM CLK alive silently during sleep
+static void dma_start_quiescent_ring(void) {
+    dma_channel_abort(dma_chan);
+    irq_set_enabled(DMA_IRQ_0, false);
+    dma_channel_set_irq0_enabled(dma_chan, false);
+
+    dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
+    channel_config_set_transfer_data_size(&cfg, DMA_SIZE_32);
+    channel_config_set_read_increment(&cfg, false);
+    channel_config_set_write_increment(&cfg, true);
+    channel_config_set_ring(&cfg, true, 11); // 2048 bytes (512 words) ring wrap
+    channel_config_set_dreq(&cfg, pio_get_dreq(pio0, 0, false));
+
+    dma_channel_configure(
+        dma_chan,
+        &cfg,
+        pdm_buf[0],
+        &pio0->rxf[0],
+        0xFFFFFFFFu,
+        true // start immediately so PIO0 never stalls and PDM CLK stays active
+    );
+}
+
+// Linear double-buffering DMA: captures 1.0 s audio frame with ISR handoff
+static void dma_start_capture_pingpong(void) {
+    dma_channel_abort(dma_chan);
+    buf_state[0] = 0;
+    buf_state[1] = 0;
+    dma_filling  = 0;
+    dma_stalled  = false;
+
+    dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
+    channel_config_set_transfer_data_size(&cfg, DMA_SIZE_32);
+    channel_config_set_read_increment(&cfg, false);
+    channel_config_set_write_increment(&cfg, true);
+    channel_config_set_ring(&cfg, false, 0); // Linear double-buffering
+    channel_config_set_dreq(&cfg, pio_get_dreq(pio0, 0, false));
+
+    dma_channel_set_irq0_enabled(dma_chan, true);
+    irq_set_exclusive_handler(DMA_IRQ_0, dma_isr);
+    irq_set_enabled(DMA_IRQ_0, true);
+
+    dma_channel_configure(
+        dma_chan,
+        &cfg,
+        pdm_buf[0],
+        &pio0->rxf[0],
+        BUF_WORDS,
+        true // start ping-pong
+    );
 }
 
 #if PIONET_TELEMETRY
@@ -163,27 +215,9 @@ int main(void)
 
     dma_chan = dma_claim_unused_channel(true);
 
-    dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
-    channel_config_set_transfer_data_size(&cfg, DMA_SIZE_32);
-    channel_config_set_read_increment(&cfg, false);
-    channel_config_set_write_increment(&cfg, true);
-    channel_config_set_dreq(&cfg, pio_get_dreq(pio, sm, false));
-
-    dma_channel_configure(
-        dma_chan,
-        &cfg,
-        pdm_buf[0],
-        &pio->rxf[sm],
-        BUF_WORDS,
-        false
-    );
-
-    dma_channel_set_irq0_enabled(dma_chan, true);
-    irq_set_exclusive_handler(DMA_IRQ_0, dma_isr);
-    irq_set_enabled(DMA_IRQ_0, true);
-
-    // DMA remains disarmed until Stage-1 PIO1 hardware wake event
-    printf("[PIO-Net] DMA configured (quiescent until Stage-1 trigger)...\n");
+    // Arm DMA in silent free-running ring mode: keeps PIO0 draining and PDM CLK alive with 0 CPU IRQs
+    dma_start_quiescent_ring();
+    printf("[PIO-Net] DMA armed in silent background ring mode (PDM CLK active, IRQs masked)...\n");
 
     // Initialize Stage-2 Mel-spectrogram feature extractor
     stage2_features_init();
@@ -232,13 +266,8 @@ int main(void)
         dc_filter_x = 0;
         dc_filter_y = 0;
 
-        // Arm DMA for exactly 1.0 second audio capture
-        buf_state[0] = 0;
-        buf_state[1] = 0;
-        dma_filling  = 0;
-        dma_stalled  = false;
-        dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
-        dma_channel_set_write_addr(dma_chan, pdm_buf[0], true);
+        // Switch DMA to linear double-buffering mode to capture exactly 1.0 second of audio
+        dma_start_capture_pingpong();
 
         // 2. Decimate 1.0 second of incoming PDM audio into a 16,000-sample int16_t PCM buffer using 64x boxcar popcount
         static int16_t pcm[STAGE2_TOTAL_SAMPLES];
@@ -300,9 +329,9 @@ int main(void)
             restore_interrupts(irq_state);
         }
 
-        dma_channel_abort(dma_chan); // Stop DMA to prevent interrupts during inference and sleep
-        buf_state[0] = 0;
-        buf_state[1] = 0;
+        // Immediately return DMA to silent background ring mode:
+        // Keeps PIO0 draining (PDM clock active) while masking DMA IRQs during inference and sleep
+        dma_start_quiescent_ring();
 
         printf("\n>>> [STAGE-1 WAKE] PIO1 Hardware Matched Filter Fired! Waking CPU!\n");
 
