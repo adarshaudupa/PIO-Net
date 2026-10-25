@@ -64,17 +64,21 @@ static volatile int8_t   bench_pred = 0;
 
 static int dma_chan;
 
-// DMA Interrupt Service Routine: continuously ping-pongs buffers
+// DMA Interrupt Service Routine: double-buffers PDM stream safely
 static void dma_isr(void) {
     dma_hw->ints0 = 1u << dma_chan;
 
     buf_state[dma_filling] = 1;
 
     uint8_t next = 1 - dma_filling;
-    dma_filling = next;
-    buf_state[next] = 0; // Ensure next buffer is ready so DMA streams continuously without stalling
-    dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
-    dma_channel_set_write_addr(dma_chan, pdm_buf[dma_filling], true);
+    if (buf_state[next] == 0) {
+        dma_filling = next;
+        dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
+        dma_channel_set_write_addr(dma_chan, pdm_buf[dma_filling], true);
+    } else {
+        dma_stalled = true;
+        overrun_count++;
+    }
 }
 
 #if PIONET_TELEMETRY
@@ -100,14 +104,15 @@ static void telemetry_core1(void) {
         uint32_t lat_ms_dec = (bench_latency_us % 1000) / 100;
         uint32_t pio1_pc = pio1->sm[0].addr;
 
-        printf("[Telemetry] Density: 0.%03lu | S1: %lu (PC: %lu) | S2: %lu us (~%lu.%lu ms, pred %d)\n",
+        printf("[Telemetry] Density: 0.%03lu | S1: %lu (PC: %lu) | S2: %lu us (~%lu.%lu ms, pred %d) | Overruns: %lu\n",
                (unsigned long)density_permille,
                (unsigned long)pio_triggers,
                (unsigned long)pio1_pc,
                (unsigned long)bench_latency_us,
                (unsigned long)lat_ms_int,
                (unsigned long)lat_ms_dec,
-               (int)bench_pred);
+               (int)bench_pred,
+               (unsigned long)overrun_count);
     }
 }
 #endif
@@ -177,8 +182,8 @@ int main(void)
     irq_set_exclusive_handler(DMA_IRQ_0, dma_isr);
     irq_set_enabled(DMA_IRQ_0, true);
 
-    dma_channel_start(dma_chan);
-    printf("[PIO-Net] DMA armed, streaming to double buffer...\n");
+    // DMA remains disarmed until Stage-1 PIO1 hardware wake event
+    printf("[PIO-Net] DMA configured (quiescent until Stage-1 trigger)...\n");
 
     // Initialize Stage-2 Mel-spectrogram feature extractor
     stage2_features_init();
@@ -222,6 +227,18 @@ int main(void)
         pio1_triggered = false;
         irq_set_enabled(PIO1_IRQ_0, false); // Mask PIO1 interrupt while CPU is capturing & processing
         gpio_put(PIONET_LED_PIN, 1);
+
+        // Reset DC filter states between captures to prevent transient leakage
+        dc_filter_x = 0;
+        dc_filter_y = 0;
+
+        // Arm DMA for exactly 1.0 second audio capture
+        buf_state[0] = 0;
+        buf_state[1] = 0;
+        dma_filling  = 0;
+        dma_stalled  = false;
+        dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
+        dma_channel_set_write_addr(dma_chan, pdm_buf[0], true);
 
         // 2. Decimate 1.0 second of incoming PDM audio into a 16,000-sample int16_t PCM buffer using 64x boxcar popcount
         static int16_t pcm[STAGE2_TOTAL_SAMPLES];
@@ -282,6 +299,10 @@ int main(void)
             }
             restore_interrupts(irq_state);
         }
+
+        dma_channel_abort(dma_chan); // Stop DMA to prevent interrupts during inference and sleep
+        buf_state[0] = 0;
+        buf_state[1] = 0;
 
         printf("\n>>> [STAGE-1 WAKE] PIO1 Hardware Matched Filter Fired! Waking CPU!\n");
 

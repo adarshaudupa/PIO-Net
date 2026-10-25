@@ -1,21 +1,20 @@
 ; ==============================================================================
 ; PIO-Net Stage-1: Two-Tier Temporal Duration-Energy Gate (RP2040 PIO1)
 ;
-; Synthesizes the best of Claude's microarchitectural rigor and Gemini's
-; two-tier persistence architecture within the strict 32-instruction silicon limit:
+; Microarchitectural implementation within strict 32-instruction silicon limit:
 ;
 ; 1. Inner Tier (Block Energy):
 ;    Evaluates 32-bit PDM sub-blocks (31.25 us). Requires >= 19 ones out of 32
 ;    (59.4% acoustic speech density).
 ; 2. Outer Tier (Temporal Persistence):
-;    Maintains a 16-block countdown loop in the ISR scratch register.
-;    Requires 16 CONSECUTIVE qualifying sub-blocks to wake the CPU.
+;    Maintains a 12-block countdown loop in the ISR scratch register.
+;    Requires 12 CONSECUTIVE qualifying sub-blocks to wake the CPU (~375 us).
 ; 3. Deterministic Reset:
 ;    If any sub-block fails (< 19 ones), the outer persistence counter is
-;    immediately reset to 16. Single-spike transients (claps < 8 ms) decay
-;    too quickly to satisfy 16 consecutive blocks and are dropped in hardware.
+;    immediately reset to 12. Short single-spike impulse transients decay
+;    too quickly to satisfy 12 consecutive blocks and are dropped in hardware.
 ; 4. Hardware IRQ Wake:
-;    When all 16 consecutive blocks qualify, asserts `irq wait 0` to wake Core 0.
+;    When all 12 consecutive blocks qualify, asserts `irq wait 0` to wake Core 0.
 ; ==============================================================================
 
 .program pdm_stage1
@@ -41,7 +40,7 @@ bit_is_high:
     ; Threshold reached! 19 ones accumulated in this sub-block -> PASS!
     mov x, isr          ; Load outer persistence counter from ISR
     jmp x-- block_ok    ; Decrement outer persistence counter
-    irq wait 0          ; All 16 consecutive blocks qualified! WAKE CPU!
+    irq wait 0          ; All 12 consecutive blocks qualified! WAKE CPU!
     jmp reset
 
 block_ok:
