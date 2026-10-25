@@ -9,8 +9,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "pico/stdlib.h"
-#include "hardware/dma.h"
 
 #ifndef __scratch_x
 #define __scratch_x(foo)
