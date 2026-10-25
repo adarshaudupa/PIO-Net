@@ -86,6 +86,11 @@ typedef struct {
 static volatile overrun_event_t last_overrun_event = {0};
 static volatile uint32_t core1_logged_overruns = 0;
 
+// 20-bin energy envelope (50 ms bins, 800 samples each, integer mean |pcm|)
+static volatile uint16_t env_bins[20] = {0};
+static volatile uint32_t env_print_seq = 0;
+static volatile uint32_t core1_printed_seq = 0;
+
 // DMA Interrupt Service Routine: double-buffers PDM stream safely during capture
 static void dma_isr(void) {
     dma_hw->ints0 = 1u << dma_chan;
@@ -181,7 +186,7 @@ static void telemetry_core1(void) {
     uint32_t tick_count = 0;
 
     while (1) {
-        sleep_ms(20);
+        sleep_ms(1);
         tick_count++;
 
         // Step 1: Log on Core 1 only at each overrun event
@@ -198,7 +203,18 @@ static void telemetry_core1(void) {
                    ph_name);
         }
 
-        if (tick_count >= 50) {
+        // Step 2: Core 1 prints the 20-bin envelope line right after STAGE-2 INFER
+        if (env_print_seq != core1_printed_seq) {
+            printf(">>> [ENV] %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
+                   (unsigned int)env_bins[0],  (unsigned int)env_bins[1],  (unsigned int)env_bins[2],  (unsigned int)env_bins[3],
+                   (unsigned int)env_bins[4],  (unsigned int)env_bins[5],  (unsigned int)env_bins[6],  (unsigned int)env_bins[7],
+                   (unsigned int)env_bins[8],  (unsigned int)env_bins[9],  (unsigned int)env_bins[10], (unsigned int)env_bins[11],
+                   (unsigned int)env_bins[12], (unsigned int)env_bins[13], (unsigned int)env_bins[14], (unsigned int)env_bins[15],
+                   (unsigned int)env_bins[16], (unsigned int)env_bins[17], (unsigned int)env_bins[18], (unsigned int)env_bins[19]);
+            core1_printed_seq = env_print_seq;
+        }
+
+        if (tick_count >= 1000) {
             tick_count = 0;
             uint32_t words   = stat_words;
             uint32_t ones    = stat_ones;
@@ -397,6 +413,17 @@ int main(void)
         dma_start_quiescent_ring();
         current_phase = PHASE_INFERENCE;
 
+        // Step 1: Compute integer mean |pcm| for each of 20 consecutive 50 ms bins (800 samples each)
+        for (int b = 0; b < 20; b++) {
+            uint32_t sum = 0;
+            const int16_t *bin_samples = &pcm[b * 800];
+            for (int s = 0; s < 800; s++) {
+                int16_t sample = bin_samples[s];
+                sum += (sample < 0) ? (uint32_t)(-sample) : (uint32_t)sample;
+            }
+            env_bins[b] = (uint16_t)(sum / 800);
+        }
+
         printf("\n>>> [STAGE-1 WAKE] PIO1 Hardware Matched Filter Fired! Waking CPU!\n");
 
         // 3. Pass the PCM buffer to stage2_extract_spectrogram(pcm, spec) to generate the [39 x 16] Mel-spectrogram
@@ -437,6 +464,12 @@ int main(void)
         printf(">>> [STAGE-2 INFER] Predicted Class: '%s' (class %d, score: %.2f) | Runner-up: '%s' (score: %.2f) | Feat: %lu us, Infer: %lu us\n",
                CLASS_NAMES[pred], pred, (double)score, CLASS_NAMES[second_pred], (double)second_score,
                (unsigned long)feat_lat, (unsigned long)inf_lat);
+
+        // Step 2: Signal Core 1 to print the 20-bin envelope line right after STAGE-2 INFER
+        env_print_seq++;
+        while (core1_printed_seq != env_print_seq) {
+            tight_loop_contents();
+        }
 
         float margin = score - second_score;
         bool confirmed = (pred == 0 && score >= 0.80f && margin >= 0.30f);
