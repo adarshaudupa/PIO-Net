@@ -24,6 +24,7 @@
 #include "hardware/dma.h"
 #include "hardware/irq.h"
 #include "hardware/sync.h"
+#include "hardware/timer.h"
 #include "pdm_reader.pio.h"
 #include "stage2_infer.h"
 #include "stage2_features.h"
@@ -60,6 +61,11 @@ static volatile uint32_t bench_latency_us = 0;
 static volatile int8_t   bench_pred = 0;
 
 static int dma_chan;
+static int timer_alarm_num = -1;
+
+static void alarm_dummy_cb(uint alarm_num) {
+    (void)alarm_num;
+}
 
 // Lag tracking (write pointer lapping read pointer)
 static volatile uint32_t lag_count = 0;
@@ -202,6 +208,11 @@ int main(void)
     dma_init_ring();
     printf("[PIO-Net] DMA armed in silent background ring mode (32KB ring, trans_count 0xFFFFFFFF, no IRQ)...\n");
 
+    // Claim dedicated hardware timer alarm for post-wake 8 ms sleep intervals
+    timer_alarm_num = hardware_alarm_claim_unused(true);
+    hardware_alarm_set_callback(timer_alarm_num, alarm_dummy_cb);
+    irq_set_enabled(TIMER_IRQ_0 + timer_alarm_num, false);
+
     // Initialize Stage-2 Mel-spectrogram feature extractor
     stage2_features_init();
 
@@ -255,12 +266,16 @@ int main(void)
         uint32_t write_idx = ((write_addr - (uintptr_t)pdm_ring) >> 2) & RING_MASK;
         uint32_t read_idx = ((write_idx + RING_WORDS - PREROLL_WORDS) & RING_MASK) & ~1u;
 
-        // STEP 3: decimate 16000 PCM samples by polling write_idx (no IRQ), consuming 64 PDM bits per sample,
-        // chasing the write pointer. Detect lag: if the write pointer would lap read_idx, print a core-1 lag counter.
+        // STEP 3 (replaces polling): after wake, loop { consume all words between read_idx and the DMA write pointer;
+        // if 16000 samples done, break; arm a hardware timer alarm 8 ms ahead; __wfi(); }
+        // No spin loop, no DMA IRQ. Before wake, CPU is only in __wfi() with DMA_IRQ_0 disabled;
+        // PIO1_IRQ_0 is sole wake source. Keep a lag counter if write pointer would lap read_idx.
         static int16_t pcm[STAGE2_TOTAL_SAMPLES];
         int samples_captured = 0;
 
-        while (samples_captured < STAGE2_TOTAL_SAMPLES) {
+        irq_set_enabled(TIMER_IRQ_0 + timer_alarm_num, true);
+
+        while (1) {
             uint32_t cur_write_addr = dma_hw->ch[dma_chan].write_addr;
             uint32_t cur_w = ((cur_write_addr - (uintptr_t)pdm_ring) >> 2) & RING_MASK;
             uint32_t avail = (cur_w + RING_WORDS - read_idx) & RING_MASK;
@@ -270,11 +285,6 @@ int main(void)
                 read_idx = (cur_w + RING_WORDS - PREROLL_WORDS) & RING_MASK;
                 read_idx &= ~1u;
                 avail = PREROLL_WORDS;
-            }
-
-            if (avail < 2) {
-                tight_loop_contents();
-                continue;
             }
 
             while (avail >= 2 && samples_captured < STAGE2_TOTAL_SAMPLES) {
@@ -298,7 +308,19 @@ int main(void)
                 if (y < -32768) y = -32768;
                 pcm[samples_captured++] = (int16_t)y;
             }
+
+            if (samples_captured >= STAGE2_TOTAL_SAMPLES) {
+                break;
+            }
+
+            // Arm a hardware timer alarm 8 ms ahead; __wfi()
+            if (!hardware_alarm_set_target(timer_alarm_num, delayed_by_us(get_absolute_time(), 8000))) {
+                __wfi();
+            }
         }
+
+        irq_set_enabled(TIMER_IRQ_0 + timer_alarm_num, false);
+        hardware_alarm_cancel(timer_alarm_num);
 
         // Step 1: Compute integer mean |pcm| for each of 20 consecutive 50 ms bins (800 samples each)
         for (int b = 0; b < 20; b++) {
