@@ -111,9 +111,11 @@ static void dma_isr(void) {
 
 // Background free-running ring DMA: keeps PIO0 draining and PDM CLK alive silently during sleep
 static void dma_start_quiescent_ring(void) {
-    dma_channel_abort(dma_chan);
+    // Disable DMA IRQ first so channel abort does not generate a spurious interrupt
     irq_set_enabled(DMA_IRQ_0, false);
     dma_channel_set_irq0_enabled(dma_chan, false);
+    dma_channel_abort(dma_chan);
+    dma_channel_acknowledge_irq0(dma_chan);
 
     dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
     channel_config_set_transfer_data_size(&cfg, DMA_SIZE_32);
@@ -135,6 +137,7 @@ static void dma_start_quiescent_ring(void) {
 // Linear double-buffering DMA: captures 1.0 s audio frame with ISR handoff
 static void dma_start_capture_pingpong(void) {
     dma_channel_abort(dma_chan);
+    dma_channel_acknowledge_irq0(dma_chan);
     buf_state[0] = 0;
     buf_state[1] = 0;
     dma_filling  = 0;
