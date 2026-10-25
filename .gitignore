@@ -34,6 +34,8 @@ subweb.txt
 Thumbs.db
 .vscode/
 .idea/
+.clangd
+compile_commands.json
 
 # RP2040 & CMake Build Artifacts
 build/

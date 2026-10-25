@@ -12,6 +12,13 @@
 #include "pico/stdlib.h"
 #include "hardware/dma.h"
 
+#ifndef __scratch_x
+#define __scratch_x(foo)
+#endif
+#ifndef __scratch_y
+#define __scratch_y(foo)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
