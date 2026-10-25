@@ -64,6 +64,28 @@ static volatile int8_t   bench_pred = 0;
 
 static int dma_chan;
 
+// Phase tracking for diagnostic overrun logging (Core 1 only)
+typedef enum {
+    PHASE_QUIESCENT = 0,
+    PHASE_SWITCH_RING_TO_PINGPONG,
+    PHASE_MID_CAPTURE,
+    PHASE_SWITCH_PINGPONG_TO_RING,
+    PHASE_INFERENCE
+} capture_phase_t;
+
+static volatile capture_phase_t current_phase = PHASE_QUIESCENT;
+
+typedef struct {
+    uint8_t  buf0;
+    uint8_t  buf1;
+    uint8_t  dma_filling;
+    uint8_t  phase;
+    uint32_t overrun_num;
+} overrun_event_t;
+
+static volatile overrun_event_t last_overrun_event = {0};
+static volatile uint32_t core1_logged_overruns = 0;
+
 // DMA Interrupt Service Routine: double-buffers PDM stream safely during capture
 static void dma_isr(void) {
     dma_hw->ints0 = 1u << dma_chan;
@@ -78,6 +100,12 @@ static void dma_isr(void) {
     } else {
         dma_stalled = true;
         overrun_count++;
+        // Capture snapshot for Core 1 diagnostic logging (logic completely untouched)
+        last_overrun_event.buf0 = buf_state[0];
+        last_overrun_event.buf1 = buf_state[1];
+        last_overrun_event.dma_filling = dma_filling;
+        last_overrun_event.phase = (uint8_t)current_phase;
+        last_overrun_event.overrun_num = overrun_count;
     }
 }
 
@@ -136,35 +164,64 @@ static void dma_start_capture_pingpong(void) {
 #if PIONET_TELEMETRY
 static uint32_t core1_stack[1024];
 
+static const char *PHASE_STRINGS[] = {
+    "quiescent",
+    "ring->pingpong",
+    "mid-capture",
+    "pingpong->ring",
+    "inference"
+};
+
 static void telemetry_core1(void) {
     uint32_t prev_words = 0, prev_ones = 0;
     static uint32_t last_density_permille = 500;
+    uint32_t tick_count = 0;
+
     while (1) {
-        sleep_ms(1000);
-        uint32_t words   = stat_words;
-        uint32_t ones    = stat_ones;
-        uint32_t d_words = words - prev_words;
-        uint32_t d_ones  = ones - prev_ones;
-        prev_words = words;
-        prev_ones  = ones;
+        sleep_ms(20);
+        tick_count++;
 
-        if (d_words > 0) {
-            last_density_permille = (uint32_t)(((uint64_t)d_ones * 1000ULL) / ((uint64_t)d_words * 32ULL));
+        // Step 1: Log on Core 1 only at each overrun event
+        uint32_t current_ov = last_overrun_event.overrun_num;
+        if (current_ov > core1_logged_overruns) {
+            core1_logged_overruns = current_ov;
+            uint8_t ph_idx = last_overrun_event.phase;
+            const char *ph_name = (ph_idx <= 4) ? PHASE_STRINGS[ph_idx] : "unknown";
+            printf("\n>>> [CORE 1 OVERRUN EVENT] Overrun #%lu | buf_state=[%u, %u] | dma_filling=%u | phase='%s'\n\n",
+                   (unsigned long)current_ov,
+                   (unsigned int)last_overrun_event.buf0,
+                   (unsigned int)last_overrun_event.buf1,
+                   (unsigned int)last_overrun_event.dma_filling,
+                   ph_name);
         }
-        uint32_t density_permille = last_density_permille;
-        uint32_t lat_ms_int = bench_latency_us / 1000;
-        uint32_t lat_ms_dec = (bench_latency_us % 1000) / 100;
-        uint32_t pio1_pc = pio1->sm[0].addr;
 
-        printf("[Telemetry] Density: 0.%03lu | S1: %lu (PC: %lu) | S2: %lu us (~%lu.%lu ms, pred %d) | Overruns: %lu\n",
-               (unsigned long)density_permille,
-               (unsigned long)pio_triggers,
-               (unsigned long)pio1_pc,
-               (unsigned long)bench_latency_us,
-               (unsigned long)lat_ms_int,
-               (unsigned long)lat_ms_dec,
-               (int)bench_pred,
-               (unsigned long)overrun_count);
+        if (tick_count >= 50) {
+            tick_count = 0;
+            uint32_t words   = stat_words;
+            uint32_t ones    = stat_ones;
+            uint32_t d_words = words - prev_words;
+            uint32_t d_ones  = ones - prev_ones;
+            prev_words = words;
+            prev_ones  = ones;
+
+            if (d_words > 0) {
+                last_density_permille = (uint32_t)(((uint64_t)d_ones * 1000ULL) / ((uint64_t)d_words * 32ULL));
+            }
+            uint32_t density_permille = last_density_permille;
+            uint32_t lat_ms_int = bench_latency_us / 1000;
+            uint32_t lat_ms_dec = (bench_latency_us % 1000) / 100;
+            uint32_t pio1_pc = pio1->sm[0].addr;
+
+            printf("[Telemetry] Density: 0.%03lu | S1: %lu (PC: %lu) | S2: %lu us (~%lu.%lu ms, pred %d) | Overruns: %lu\n",
+                   (unsigned long)density_permille,
+                   (unsigned long)pio_triggers,
+                   (unsigned long)pio1_pc,
+                   (unsigned long)bench_latency_us,
+                   (unsigned long)lat_ms_int,
+                   (unsigned long)lat_ms_dec,
+                   (int)bench_pred,
+                   (unsigned long)overrun_count);
+        }
     }
 }
 #endif
@@ -267,12 +324,14 @@ int main(void)
         dc_filter_y = 0;
 
         // Switch DMA to linear double-buffering mode to capture exactly 1.0 second of audio
+        current_phase = PHASE_SWITCH_RING_TO_PINGPONG;
         dma_start_capture_pingpong();
 
         // 2. Decimate 1.0 second of incoming PDM audio into a 16,000-sample int16_t PCM buffer using 64x boxcar popcount
         static int16_t pcm[STAGE2_TOTAL_SAMPLES];
         int samples_captured = 0;
 
+        current_phase = PHASE_MID_CAPTURE;
         while (samples_captured < STAGE2_TOTAL_SAMPLES) {
             uint8_t proc = 0xFF;
             while (proc == 0xFF) {
@@ -331,7 +390,9 @@ int main(void)
 
         // Immediately return DMA to silent background ring mode:
         // Keeps PIO0 draining (PDM clock active) while masking DMA IRQs during inference and sleep
+        current_phase = PHASE_SWITCH_PINGPONG_TO_RING;
         dma_start_quiescent_ring();
+        current_phase = PHASE_INFERENCE;
 
         printf("\n>>> [STAGE-1 WAKE] PIO1 Hardware Matched Filter Fired! Waking CPU!\n");
 
@@ -403,6 +464,7 @@ int main(void)
             sleep_ms(200);
         }
 
+        current_phase = PHASE_QUIESCENT;
         gpio_put(PIONET_LED_PIN, 0);
         pio1_hw->irq = 1u; // Clear any pending hardware flag during processing
         pio1_triggered = false;
