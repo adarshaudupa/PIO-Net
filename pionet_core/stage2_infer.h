@@ -7,7 +7,10 @@
 // Returns predicted class index (0 to 11)
 int8_t stage2_classify(const int8_t *spectrogram_features);
 
-// Convenience wrapper for float spectrogram features
+// Direct high-precision Q8 fixed-point (scale 256.0f) inference pass
+int8_t stage2_classify_q8(const int16_t *in_q8);
+
+// Convenience wrapper for float spectrogram features (direct high-precision Q8 conversion)
 int8_t stage2_classify_float(const float *spectrogram_features);
 
 // Returns the logit / score of the top-1 predicted class

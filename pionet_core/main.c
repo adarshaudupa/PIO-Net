@@ -405,15 +405,7 @@ int main(void)
         stage2_extract_spectrogram(pcm, spectrogram);
         uint32_t feat_lat = time_us_32() - t_feat;
 
-        // 4. Quantize the float spectrogram to int8_t and pass it to stage2_classify()
-        static int8_t spectrogram_int8[STAGE2_NUM_FRAMES * STAGE2_NUM_MELS];
-        for (int i = 0; i < STAGE2_NUM_FRAMES * STAGE2_NUM_MELS; i++) {
-            int32_t val = (int32_t)roundf(spectrogram[i] * 32.0f);
-            if (val > 127) val = 127;
-            if (val < -128) val = -128;
-            spectrogram_int8[i] = (int8_t)val;
-        }
-
+        // 4. Pass high-precision spectrogram directly to Stage-2 classifier (scale 256.0f)
         int8_t pred = 10;
         float score = 0.0f;
         int8_t second_pred = 11;
@@ -429,7 +421,7 @@ int main(void)
         } else {
             gpio_put(22, 1);
             uint32_t t_inf = time_us_32();
-            pred = stage2_classify(spectrogram_int8);
+            pred = stage2_classify_float(spectrogram);
             score = stage2_get_last_score();
             second_pred = stage2_get_second_class();
             second_score = stage2_get_second_score();
