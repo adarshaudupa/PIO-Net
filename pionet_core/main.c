@@ -33,16 +33,13 @@
 #define PIONET_TELEMETRY 1   // Set to 0 for bench power measurements
 #endif
 
-// Double buffers isolated to dedicated SRAM banks to prevent AHB bus contention (2048-byte aligned for ring wrap)
-static uint32_t __scratch_x("pdm_buf0") __aligned(2048) pdm_buf0[BUF_WORDS];
-static uint32_t __scratch_y("pdm_buf1") __aligned(2048) pdm_buf1[BUF_WORDS];
-static uint32_t * const pdm_buf[2] = { pdm_buf0, pdm_buf1 };
+// STEP 1: Free-running circular ring buffer in main SRAM (32768 bytes, 8192 uint32_t words, 256 ms of history)
+#define RING_BYTES          32768
+#define RING_WORDS          (RING_BYTES / sizeof(uint32_t)) // 8192 words
+#define RING_MASK           (RING_WORDS - 1)               // 8191 (0x1FFF)
+#define PREROLL_WORDS       4800                           // 150 ms at 32000 words/s
 
-// buf_state: 0 = free (DMA write), 1 = full (CPU pending), 2 = active (CPU processing)
-static volatile uint8_t  buf_state[2] = {0, 0};
-static volatile uint8_t  dma_filling  = 0;
-static volatile bool     dma_stalled  = false;
-static volatile uint32_t overrun_count = 0;
+static uint32_t __aligned(RING_BYTES) pdm_ring[RING_WORDS];
 
 // 12-Class MLPerf Tiny keyword labels
 static const char *CLASS_NAMES[12] = {
@@ -64,121 +61,37 @@ static volatile int8_t   bench_pred = 0;
 
 static int dma_chan;
 
-// Phase tracking for diagnostic overrun logging (Core 1 only)
-typedef enum {
-    PHASE_QUIESCENT = 0,
-    PHASE_SWITCH_RING_TO_PINGPONG,
-    PHASE_MID_CAPTURE,
-    PHASE_SWITCH_PINGPONG_TO_RING,
-    PHASE_INFERENCE
-} capture_phase_t;
-
-static volatile capture_phase_t current_phase = PHASE_QUIESCENT;
-
-typedef struct {
-    uint8_t  buf0;
-    uint8_t  buf1;
-    uint8_t  dma_filling;
-    uint8_t  phase;
-    uint32_t overrun_num;
-} overrun_event_t;
-
-static volatile overrun_event_t last_overrun_event = {0};
-static volatile uint32_t core1_logged_overruns = 0;
+// Lag tracking (write pointer lapping read pointer)
+static volatile uint32_t lag_count = 0;
+static volatile uint32_t core1_logged_lag = 0;
 
 // 20-bin energy envelope (50 ms bins, 800 samples each, integer mean |pcm|)
 static volatile uint16_t env_bins[20] = {0};
 static volatile uint32_t env_print_seq = 0;
 static volatile uint32_t core1_printed_seq = 0;
 
-// DMA Interrupt Service Routine: double-buffers PDM stream safely during capture
-static void dma_isr(void) {
-    dma_hw->ints0 = 1u << dma_chan;
-
-    buf_state[dma_filling] = 1;
-
-    uint8_t next = 1 - dma_filling;
-    if (buf_state[next] == 0) {
-        dma_filling = next;
-        dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
-        dma_channel_set_write_addr(dma_chan, pdm_buf[dma_filling], true);
-    } else {
-        dma_stalled = true;
-        overrun_count++;
-        // Capture snapshot for Core 1 diagnostic logging (logic completely untouched)
-        last_overrun_event.buf0 = buf_state[0];
-        last_overrun_event.buf1 = buf_state[1];
-        last_overrun_event.dma_filling = dma_filling;
-        last_overrun_event.phase = (uint8_t)current_phase;
-        last_overrun_event.overrun_num = overrun_count;
-    }
-}
-
-// Background free-running ring DMA: keeps PIO0 draining and PDM CLK alive silently during sleep
-static void dma_start_quiescent_ring(void) {
-    // Disable DMA IRQ first so channel abort does not generate a spurious interrupt
-    irq_set_enabled(DMA_IRQ_0, false);
-    dma_channel_set_irq0_enabled(dma_chan, false);
-    dma_channel_abort(dma_chan);
-    dma_channel_acknowledge_irq0(dma_chan);
-
+// STEP 1: One free-running ring DMA, 32768 bytes aligned to 32768 in main SRAM, trans_count 0xFFFFFFFF, NO DMA IRQ.
+// SM0 keeps draining it continuously.
+static void dma_init_ring(void) {
     dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
     channel_config_set_transfer_data_size(&cfg, DMA_SIZE_32);
     channel_config_set_read_increment(&cfg, false);
     channel_config_set_write_increment(&cfg, true);
-    channel_config_set_ring(&cfg, true, 11); // 2048 bytes (512 words) ring wrap
+    channel_config_set_ring(&cfg, true, 15); // 32768 bytes (8192 words) ring wrap
     channel_config_set_dreq(&cfg, pio_get_dreq(pio0, 0, false));
 
     dma_channel_configure(
         dma_chan,
         &cfg,
-        pdm_buf[0],
+        pdm_ring,
         &pio0->rxf[0],
         0xFFFFFFFFu,
         true // start immediately so PIO0 never stalls and PDM CLK stays active
     );
 }
 
-// Linear double-buffering DMA: captures 1.0 s audio frame with ISR handoff
-static void dma_start_capture_pingpong(void) {
-    dma_channel_abort(dma_chan);
-    dma_channel_acknowledge_irq0(dma_chan);
-    buf_state[0] = 0;
-    buf_state[1] = 0;
-    dma_filling  = 0;
-    dma_stalled  = false;
-
-    dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
-    channel_config_set_transfer_data_size(&cfg, DMA_SIZE_32);
-    channel_config_set_read_increment(&cfg, false);
-    channel_config_set_write_increment(&cfg, true);
-    channel_config_set_ring(&cfg, false, 0); // Linear double-buffering
-    channel_config_set_dreq(&cfg, pio_get_dreq(pio0, 0, false));
-
-    dma_channel_set_irq0_enabled(dma_chan, true);
-    irq_set_exclusive_handler(DMA_IRQ_0, dma_isr);
-    irq_set_enabled(DMA_IRQ_0, true);
-
-    dma_channel_configure(
-        dma_chan,
-        &cfg,
-        pdm_buf[0],
-        &pio0->rxf[0],
-        BUF_WORDS,
-        true // start ping-pong
-    );
-}
-
 #if PIONET_TELEMETRY
 static uint32_t core1_stack[1024];
-
-static const char *PHASE_STRINGS[] = {
-    "quiescent",
-    "ring->pingpong",
-    "mid-capture",
-    "pingpong->ring",
-    "inference"
-};
 
 static void telemetry_core1(void) {
     uint32_t prev_words = 0, prev_ones = 0;
@@ -189,18 +102,12 @@ static void telemetry_core1(void) {
         sleep_ms(1);
         tick_count++;
 
-        // Step 1: Log on Core 1 only at each overrun event
-        uint32_t current_ov = last_overrun_event.overrun_num;
-        if (current_ov > core1_logged_overruns) {
-            core1_logged_overruns = current_ov;
-            uint8_t ph_idx = last_overrun_event.phase;
-            const char *ph_name = (ph_idx <= 4) ? PHASE_STRINGS[ph_idx] : "unknown";
-            printf("\n>>> [CORE 1 OVERRUN EVENT] Overrun #%lu | buf_state=[%u, %u] | dma_filling=%u | phase='%s'\n\n",
-                   (unsigned long)current_ov,
-                   (unsigned int)last_overrun_event.buf0,
-                   (unsigned int)last_overrun_event.buf1,
-                   (unsigned int)last_overrun_event.dma_filling,
-                   ph_name);
+        // Core 1 lag logger: prints lag counter if write pointer lapped read_idx
+        uint32_t current_lag = lag_count;
+        if (current_lag > core1_logged_lag) {
+            core1_logged_lag = current_lag;
+            printf("\n>>> [CORE 1 LAG EVENT] Lag counter: %lu | write pointer lapped read_idx\n\n",
+                   (unsigned long)current_lag);
         }
 
         // Step 2: Core 1 prints the 20-bin envelope line right after STAGE-2 INFER
@@ -239,7 +146,7 @@ static void telemetry_core1(void) {
                    (unsigned long)lat_ms_int,
                    (unsigned long)lat_ms_dec,
                    (int)bench_pred,
-                   (unsigned long)overrun_count);
+                   (unsigned long)lag_count);
         }
     }
 }
@@ -292,8 +199,8 @@ int main(void)
     dma_chan = dma_claim_unused_channel(true);
 
     // Arm DMA in silent free-running ring mode: keeps PIO0 draining and PDM CLK alive with 0 CPU IRQs
-    dma_start_quiescent_ring();
-    printf("[PIO-Net] DMA armed in silent background ring mode (PDM CLK active, IRQs masked)...\n");
+    dma_init_ring();
+    printf("[PIO-Net] DMA armed in silent background ring mode (32KB ring, trans_count 0xFFFFFFFF, no IRQ)...\n");
 
     // Initialize Stage-2 Mel-spectrogram feature extractor
     stage2_features_init();
@@ -342,39 +249,44 @@ int main(void)
         dc_filter_x = 0;
         dc_filter_y = 0;
 
-        // Switch DMA to linear double-buffering mode to capture exactly 1.0 second of audio
-        current_phase = PHASE_SWITCH_RING_TO_PINGPONG;
-        dma_start_capture_pingpong();
+        // STEP 2: on PIO1 wake, read dma_hw->ch[dma_chan].write_addr, convert to a word index,
+        // and set read_idx = write_idx - PREROLL_WORDS (modulo ring). PREROLL_WORDS is 4800 (150 ms).
+        uint32_t write_addr = dma_hw->ch[dma_chan].write_addr;
+        uint32_t write_idx = ((write_addr - (uintptr_t)pdm_ring) >> 2) & RING_MASK;
+        uint32_t read_idx = ((write_idx + RING_WORDS - PREROLL_WORDS) & RING_MASK) & ~1u;
 
-        // 2. Decimate 1.0 second of incoming PDM audio into a 16,000-sample int16_t PCM buffer using 64x boxcar popcount
+        // STEP 3: decimate 16000 PCM samples by polling write_idx (no IRQ), consuming 64 PDM bits per sample,
+        // chasing the write pointer. Detect lag: if the write pointer would lap read_idx, print a core-1 lag counter.
         static int16_t pcm[STAGE2_TOTAL_SAMPLES];
         int samples_captured = 0;
 
-        current_phase = PHASE_MID_CAPTURE;
         while (samples_captured < STAGE2_TOTAL_SAMPLES) {
-            uint8_t proc = 0xFF;
-            while (proc == 0xFF) {
-                for (uint8_t i = 0; i < 2; i++) {
-                    if (buf_state[i] == 1) { proc = i; break; }
-                }
-                if (proc == 0xFF) {
-                    __wfi();
-                }
-            }
-            buf_state[proc] = 2; // active processing
-            uint32_t *buf = pdm_buf[proc];
+            uint32_t cur_write_addr = dma_hw->ch[dma_chan].write_addr;
+            uint32_t cur_w = ((cur_write_addr - (uintptr_t)pdm_ring) >> 2) & RING_MASK;
+            uint32_t avail = (cur_w + RING_WORDS - read_idx) & RING_MASK;
 
-            int to_take = BUF_WORDS / 2; // Exactly 128 PCM samples per 256 PDM words (64x decimation)
-            if (samples_captured + to_take > STAGE2_TOTAL_SAMPLES) {
-                to_take = STAGE2_TOTAL_SAMPLES - samples_captured;
+            if (avail >= RING_WORDS - 64) {
+                lag_count++;
+                read_idx = (cur_w + RING_WORDS - PREROLL_WORDS) & RING_MASK;
+                read_idx &= ~1u;
+                avail = PREROLL_WORDS;
             }
 
-            uint32_t buf_ones = 0;
-            for (int s = 0; s < to_take; s++) {
-                uint32_t w0 = buf[s * 2];
-                uint32_t w1 = buf[s * 2 + 1];
+            if (avail < 2) {
+                tight_loop_contents();
+                continue;
+            }
+
+            while (avail >= 2 && samples_captured < STAGE2_TOTAL_SAMPLES) {
+                uint32_t w0 = pdm_ring[read_idx];
+                uint32_t w1 = pdm_ring[read_idx + 1];
+                read_idx = (read_idx + 2) & RING_MASK;
+                avail -= 2;
+
                 int32_t ones = __builtin_popcount(w0) + __builtin_popcount(w1);
-                buf_ones += ones;
+                stat_words += 2;
+                stat_ones  += (uint32_t)ones;
+
                 // 64x boxcar popcount decimation: ones is in [0, 64], center is 32
                 // (ones - 32) is [-32, 32]. Shifting by 10 maps exactly to 16-bit range [-32768, 32768]
                 int32_t x = (ones - 32) << 10;
@@ -384,34 +296,9 @@ int main(void)
                 dc_filter_y = y;
                 if (y > 32767)  y = 32767;
                 if (y < -32768) y = -32768;
-                pcm[samples_captured + s] = (int16_t)y;
+                pcm[samples_captured++] = (int16_t)y;
             }
-#if PIONET_DEV_DUMP_PDM
-            for (int w = 0; w < to_take * 2; w++) {
-                printf("%08lx\n", (unsigned long)buf[w]);
-            }
-#endif
-            samples_captured += to_take;
-
-            stat_words += to_take * 2;
-            stat_ones  += buf_ones;
-            buf_state[proc] = 0;
-
-            uint32_t irq_state = save_and_disable_interrupts();
-            if (dma_stalled) {
-                dma_stalled = false;
-                dma_filling = proc;
-                dma_channel_set_trans_count(dma_chan, BUF_WORDS, false);
-                dma_channel_set_write_addr(dma_chan, pdm_buf[proc], true);
-            }
-            restore_interrupts(irq_state);
         }
-
-        // Immediately return DMA to silent background ring mode:
-        // Keeps PIO0 draining (PDM clock active) while masking DMA IRQs during inference and sleep
-        current_phase = PHASE_SWITCH_PINGPONG_TO_RING;
-        dma_start_quiescent_ring();
-        current_phase = PHASE_INFERENCE;
 
         // Step 1: Compute integer mean |pcm| for each of 20 consecutive 50 ms bins (800 samples each)
         for (int b = 0; b < 20; b++) {
@@ -492,7 +379,6 @@ int main(void)
             sleep_ms(200);
         }
 
-        current_phase = PHASE_QUIESCENT;
         gpio_put(PIONET_LED_PIN, 0);
         pio1_hw->irq = 1u; // Clear any pending hardware flag during processing
         pio1_triggered = false;
