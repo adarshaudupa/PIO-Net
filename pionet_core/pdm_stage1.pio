@@ -4,24 +4,26 @@
 ; Microarchitectural implementation within strict 32-instruction silicon limit:
 ;
 ; 1. Inner Tier (Block Energy):
-;    Evaluates 32-bit PDM sub-blocks (31.25 us). Requires >= 19 ones out of 32
-;    (59.4% acoustic speech density).
+;    >= 19 ones within a 32-clock window ends a block (accumulating 19 ones
+;    qualifies early; otherwise the block fails when 32 clocks elapse).
 ; 2. Outer Tier (Temporal Persistence):
 ;    Maintains a 12-block countdown loop in the ISR scratch register.
-;    Requires 12 CONSECUTIVE qualifying sub-blocks to wake the CPU (~375 us).
-; 3. Deterministic Reset:
-;    If any sub-block fails (< 19 ones), the outer persistence counter is
-;    immediately reset to 12. Short single-spike impulse transients decay
-;    too quickly to satisfy 12 consecutive blocks and are dropped in hardware.
-; 4. Hardware IRQ Wake:
-;    When all 12 consecutive blocks qualify, asserts `irq wait 0` to wake Core 0.
+;    12 consecutive qualifying blocks fire irq wait 0.
+; 3. Timing & Persistence:
+;    Because qualifying blocks end upon the 19th one, each block lasts 19-32
+;    clocks; at 1.024 MHz PDM clock, persistence is about 0.2-0.4 ms.
+; 4. Deterministic Reset:
+;    If any block fails (< 19 ones within 32 clocks), the outer persistence
+;    counter is immediately reset to 12.
+; 5. Hardware IRQ Wake:
+;    When 12 consecutive blocks qualify, asserts `irq wait 0` to wake CPU.
 ; ==============================================================================
 
 .program pdm_stage1
 
 .wrap_target
 reset:
-    set x, 11           ; Outer counter: require 12 consecutive qualifying sub-blocks (375 us)
+    set x, 11           ; Outer counter: require 12 consecutive qualifying blocks (~0.2-0.4 ms)
     mov isr, x
 
 new_block:

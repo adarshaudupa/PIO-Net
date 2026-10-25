@@ -32,6 +32,14 @@ extern "C" {
 #define PIONET_LED_PIN              PICO_DEFAULT_LED_PIN
 #endif
 
+#ifndef PIONET_TELEMETRY
+#define PIONET_TELEMETRY            1       // Default 1: enable Core-1 telemetry stream; set 0 for power measurements
+#endif
+
+#ifndef PIONET_STATUS_LED
+#define PIONET_STATUS_LED           1       // Default 1: enable status LED blinks/activity; set 0 for power measurements
+#endif
+
 // ------------------------------------------------------------------------------
 // PDM Sampling & Decimation Specifications
 // ------------------------------------------------------------------------------
@@ -47,9 +55,7 @@ extern "C" {
 // Co-designed with Gigi's Bit-Stream Acoustic Simulation & NAS
 // ------------------------------------------------------------------------------
 #define PIONET_STAGE1_PATTERN       0xFFFFFFFFu  // Acoustic high-pressure bitstream signature
-#define PIONET_STAGE1_THRESHOLD     21           // Minimum matching bits out of 32 (Hamming dist <= 11)
 #define PIONET_LED_HOLD_WORDS       1000         // ~31 ms hold for human eye; set to 0 for oscilloscope probing
-#define PIONET_STAGE1_ENERGY_THRESHOLD  58       // Base onset energy threshold; adapts dynamically with noise floor (min 58)
 #define PIONET_DEV_DUMP_PDM         0            // Set to 1 in dev build to dump raw PDM words over USB on wake
 
 /**

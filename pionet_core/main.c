@@ -33,6 +33,10 @@
 #define PIONET_TELEMETRY 1   // Set to 0 for bench power measurements
 #endif
 
+#ifndef PIONET_STATUS_LED
+#define PIONET_STATUS_LED 1  // Set to 0 for bench power measurements
+#endif
+
 // Double buffers isolated to dedicated SRAM banks to prevent AHB bus contention (2048-byte aligned for ring wrap)
 static uint32_t __scratch_x("pdm_buf0") __aligned(2048) pdm_buf0[BUF_WORDS];
 static uint32_t __scratch_y("pdm_buf1") __aligned(2048) pdm_buf1[BUF_WORDS];
@@ -242,6 +246,7 @@ int main(void)
 {
     stdio_init_all();
 
+#if PIONET_STATUS_LED
     gpio_init(PIONET_LED_PIN);
     gpio_set_dir(PIONET_LED_PIN, GPIO_OUT);
     gpio_put(PIONET_LED_PIN, 0);
@@ -253,6 +258,7 @@ int main(void)
         gpio_put(PIONET_LED_PIN, 0);
         sleep_ms(60);
     }
+#endif
 
     printf("\n=======================================================\n");
     printf("   PIO-Net: Embedded Acoustic Wake-Up Core (SM-A)     \n");
@@ -311,7 +317,9 @@ int main(void)
     while (1) {
         // Task 3: Make pio1_triggered the sole wake condition.
         // When pio1_triggered is false, keep Core 0 sleeping in __wfi().
+#if PIONET_STATUS_LED
         gpio_put(PIONET_LED_PIN, 0);
+#endif
         while (!pio1_triggered) {
             __wfi();
         }
@@ -320,7 +328,9 @@ int main(void)
         // 1. Acknowledge trigger and turn on the status LED
         pio1_triggered = false;
         irq_set_enabled(PIO1_IRQ_0, false); // Mask PIO1 interrupt while CPU is capturing & processing
+#if PIONET_STATUS_LED
         gpio_put(PIONET_LED_PIN, 1);
+#endif
 
         // Reset DC filter states between captures to prevent transient leakage
         dc_filter_x = 0;
@@ -460,7 +470,9 @@ int main(void)
         }
 
         current_phase = PHASE_QUIESCENT;
+#if PIONET_STATUS_LED
         gpio_put(PIONET_LED_PIN, 0);
+#endif
         pio1_hw->irq = 1u; // Clear any pending hardware flag during processing
         pio1_triggered = false;
         irq_set_enabled(PIO1_IRQ_0, true); // Re-arm hardware interrupt for sleep

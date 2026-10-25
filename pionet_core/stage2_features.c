@@ -1,9 +1,9 @@
 // ==============================================================================
 // PIO-Net Stage-2 Feature Extractor: 16 kHz Audio -> [39 x 16] Mel-Spectrogram
-// Single-Cycle 32-bit Block Floating Point FFT optimized for Cortex-M0+ hardware multiplier
+// 32-bit Block Floating Point FFT optimized for Cortex-M0+ hardware multiplier
 // Verified bfp_fft512 tracks fft_shifts and rescales magnitudes via << fft_shifts
 // Precomputed Mel filterbank LUT (zero runtime divisions!)
-// Measured Latency: Feat 87 ms, Infer 23.7 ms on RP2040 Cortex-M0+
+// Measured Latency: Feat ~87 ms, Infer ~24 ms at the clock in use (125 MHz RP2040)
 // ==============================================================================
 
 #include "stage2_features.h"
@@ -176,7 +176,7 @@ void stage2_extract_spectrogram(const int16_t *audio_pcm, float *out_spec) {
             if (aval > init_max) init_max = aval;
         }
 
-        // Single-Cycle Block Floating Point FFT (~2.2 ms per frame on Cortex-M0+, total Feat ~87 ms)
+        // Block Floating Point FFT (~2.2 ms per frame on Cortex-M0+, total Feat ~87 ms)
         int fft_shifts = bfp_fft512(real_buf, imag_buf, init_max);
 
         // Alpha-max + Beta-min magnitude approximation (3 instructions, <1.5% error)
