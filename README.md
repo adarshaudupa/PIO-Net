@@ -15,34 +15,35 @@
 **PIO-Net** is an ultra-low-power, two-stage cascaded keyword wake-up system designed for the Raspberry Pi RP2040 microcontroller. 
 
 Continuous acoustic keyword spotting (KWS) typically demands tens of milliwatts, draining portable batteries in days. PIO-Net solves this by offloading acoustic tripwire monitoring to the RP2040's **Programmable I/O (PIO)** hardware subsystem:
-1. **Stage 1 (Hardware 1-Bit Matcher):** The PIO state machine directly ingests 1.024 MHz 1-bit Pulse Density Modulation (PDM) streams from a digital microphone and evaluates a 32-bit popcount matched filter (`0xFFFFFFFF`, $\theta = 22$) in hardware at **1 clock cycle per bit**, while the main CPU stays in deep sleep.
-2. **Stage 2 (On-Demand M0+ Classifier):** When triggered by a PIO interrupt, ARM Cortex-M0+ Core 0 wakes up and executes an INT8 quantized depthwise separable convolutional neural network (`DSCNNMicro`) in **6.44 ms** using **6.25 KB SRAM**.
+1. **Stage 1 (Hardware 1-Bit Energy Gate):** The PIO state machine directly ingests the 1.024 MHz 1-bit Pulse Density Modulation (PDM) stream from a digital microphone and evaluates a dual-tier energy gate in hardware ($\ge 19$ ones within a 32-clock window, requiring 12 consecutive qualifying blocks for a persistence of about 0.2–0.4 ms) before asserting an interrupt, while the main CPU stays in deep sleep (`__wfi()`).
+2. **Stage 2 (On-Demand M0+ Classifier):** When triggered by the PIO interrupt, ARM Cortex-M0+ Core 0 wakes up, captures 1.0 s of decimated audio, extracts a [39 frames $\times$ 16 Mel bins] spectrogram in **Feat ~87 ms**, and executes an INT8 quantized depthwise separable convolutional neural network (`DSCNNMicro`) in **Infer ~24 ms at 125 MHz**, achieving a total wake-to-decision latency of **about 1.1 s** (including the 1.0 s capture).
 
 ```
 [Digital PDM Microphone]
            │ (1.024 MHz 1-bit PDM stream)
            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ RP2040 PIO Subsystem (State Machine 0)                      │
-│ • 1-cycle/bit popcount match filter                         │
-│ • Match Pattern: 0xFFFFFFFF (32 ones)                       │
-│ • Decision Threshold: θ = 22 / 32                           │
+│ RP2040 PIO Subsystem (State Machine 1)                      │
+│ • Dual-tier temporal energy gate                            │
+│ • Inner block: >= 19 ones within 32 PDM clocks              │
+│ • Outer persistence: 12 consecutive blocks (~0.2-0.4 ms)    │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ (Match Count >= 22?)
-                           ├────────────── No  ──> Stay asleep (0% CPU load)
-                           ▼ Yes (Acoustic Tripwire Fired)
+                           │ (12 consecutive blocks qualified?)
+                           ├────────────── No  ──> Reset counter, stay asleep (0% CPU load)
+                           ▼ Yes (Acoustic Tripwire Fired / IRQ 0)
 ┌─────────────────────────────────────────────────────────────┐
 │ DMA Controller (Circular Ping-Pong Buffer)                  │
-│ • Transfers audio words into SRAM Bank 1                    │
+│ • Transfers audio words into SRAM                           │
 │ • Zero AHB crossbar contention with CPU execution           │
 └──────────────────────────┬──────────────────────────────────┘
                            │ Wake-up IRQ
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ ARM Cortex-M0+ Core 0 @ 125 MHz (Wakes from Deep Sleep)     │
-│ • Feature Extractor: [39 frames, 16 Mel bins] Spectrogram   │
-│ • Stage-2 Classifier: DSCNNMicro (Folded BatchNorm)         │
-│ • Quantization: CMSIS-NN INT8 (< 6.4 KB SRAM, 4.1 KB Flash) │
+│ • Audio Capture: 1.0 s (16,000 PCM samples)                 │
+│ • Feature Extractor: Mel Spectrogram (Feat ~87 ms)          │
+│ • Stage-2 Classifier: DSCNNMicro INT8 (Infer ~24 ms)        │
+│ • Total Wake-to-Decision Latency: ~1.1 s                    │
 └──────────────────────────┬──────────────────────────────────┘
                            │
                            ▼
@@ -53,17 +54,33 @@ Continuous acoustic keyword spotting (KWS) typically demands tens of milliwatts,
 
 ## 🚀 Key Results & Performance Benchmark
 
-| Architectural Pipeline | VAD Tripwire | CPU Duty Cycle | Power (mW) | 2x AAA Lifetime | Macro Recall | False-Wake Rate |
-|---|---|---|---|---|---|---|
-| **Config A (Continuous CPU)** | WebRTC VAD | 100.0% | 65.01 mW | 39.2 h (1.6 days) | 90.8% | Baseline |
-| **Config B (Periodic 20ms)** | Energy VAD | 12.6% | 26.67 mW | 95.6 h (4.0 days) | 88.2% | Baseline |
-| **PIO-Net (Cascaded Ours)** | **1-Bit PIO Matcher** | **0.0% (quiescent)** | **17.95 mW** | **142.1 h (5.9 days)** | **90.8%** | **0.0 / hour** |
+### Empirical Hardware Measurements (RP2040 Board @ 125 MHz)
 
-* **72.4% Power Reduction:** From 65.01 mW down to 17.95 mW.
-* **142.1 Hours ($5.9$ Days) on 2x AAA:** $3.6\times$ extension over continuous streaming.
-* **$99.74\%$ Noise Variance Suppression:** Proved analytically and empirically.
-* **Zero Bus Contention:** Verified across 5,000 AHB crossbar arbitration cycles.
-* **Fast Wake Latency:** Post-wake inference takes only 6.44 ms.
+| Pipeline Stage / Metric | Basis | Measured Value | Implementation / Hardware Setup |
+|---|---|---|---|
+| **Stage-1 Detection Window** | **MEASURED** | $\ge 19$ ones within 32 clocks | Inner sub-block threshold evaluated in PIO1 (`pdm_stage1.pio`) |
+| **Stage-1 Persistence Gate** | **MEASURED** | 12 consecutive blocks | Persistence duration: about 0.2–0.4 ms at 1.024 MHz PDM clock before IRQ assert |
+| **Quiescent CPU Duty Cycle** | **MEASURED** | 0.0% | Core 0 in `__wfi()`, silent ring DMA keeps microphone clock alive (0 CPU IRQs) |
+| **Audio Capture Window** | **MEASURED** | 1.0 s | 16,000 PCM samples decimated at 64x popcount from 1.024 MHz stream |
+| **Stage-2 Feature Extraction** | **MEASURED** | Feat ~87 ms | [39 $\times$ 16] Mel-spectrogram with 32-bit BFP FFT on Cortex-M0+ |
+| **Stage-2 Classifier Inference** | **MEASURED** | Infer ~24 ms | DSCNNMicro INT8 inference at 125 MHz on Cortex-M0+ hardware multiplier |
+| **Total Wake-to-Decision** | **MEASURED** | ~1.1 s | From Stage-1 IRQ assert to classification output (including 1.0 s capture) |
+| **Stage-2 Classification Acc.** | **MEASURED** | 82.4% | Full-resolution Q8 features on Speech Commands 12-class benchmark |
+
+### Comparative System Analysis
+
+| Architectural Pipeline | Basis | VAD Tripwire | CPU Duty Cycle | Power (mW) [SIM] | 2x AAA Lifetime [SIM] | Macro Recall [SIM] | False-Wake Rate [SIM] |
+|---|---|---|---|---|---|---|---|
+| **Config A (Continuous CPU)** | **SIM** | WebRTC VAD | 100.0% | 65.01 mW | 39.2 h (1.6 days) | 90.8% | Baseline |
+| **Config B (Periodic 20ms)** | **SIM** | Energy VAD | 12.6% | 26.67 mW | 95.6 h (4.0 days) | 88.2% | Baseline |
+| **PIO-Net (Cascaded Analytical)** | **SIM** | 1-Bit PIO Gate | 0.0% (quiescent) | 17.95 mW | 142.1 h (5.9 days) | 90.8% | 0.0 / hour |
+
+* **Hardware Stage-1 Gate [MEASURED]:** Gate requires $\ge 19$ ones within 32 clocks, 12 consecutive blocks, persistence about 0.2–0.4 ms at 1.024 MHz PDM clock.
+* **Measured On-Board Latencies [MEASURED]:** Feat ~87 ms, Infer ~24 ms at 125 MHz; wake-to-decision about 1.1 s including a 1.0 s capture.
+* **Quiescent CPU Load [MEASURED]:** 0.0% CPU duty cycle in sleep with silent background ring DMA keeping the PDM clock active with 0 CPU IRQs.
+* **Power Reduction [SIM]:** 72.4% power reduction in analytical simulation (from 65.01 mW down to 17.95 mW, extending modeled 2x AAA battery lifetime from 39.2 h to 142.1 h / 5.9 days).
+* **Noise Suppression [SIM]:** 99.74% noise variance suppression evaluated in acoustic simulation suites.
+* **Bus Contention [SIM]:** Zero crossbar arbitration contention verified across 5,000 AHB simulation cycles.
 
 ---
 
