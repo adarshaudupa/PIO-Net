@@ -58,6 +58,18 @@ target_link_libraries(pionet_core PRIVATE
         pico_multicore
 )
 
+option(PIONET_ENABLE_STDIO_USB "Enable USB stdio output" ON)
+option(PIONET_VARIANT2_POWER "Build variant2 with USB stdio, telemetry, and status LED disabled for power measurements" OFF)
+
+if (PIONET_VARIANT2_POWER)
+    set(PIONET_ENABLE_STDIO_USB OFF)
+    target_compile_definitions(pionet_core PRIVATE PIONET_TELEMETRY=0 PIONET_STATUS_LED=0)
+endif ()
+
 pico_add_extra_outputs(pionet_core)
-pico_enable_stdio_usb(pionet_core 1)
+if (PIONET_ENABLE_STDIO_USB)
+    pico_enable_stdio_usb(pionet_core 1)
+else ()
+    pico_enable_stdio_usb(pionet_core 0)
+endif ()
 pico_enable_stdio_uart(pionet_core 0)
