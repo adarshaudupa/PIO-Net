@@ -1,7 +1,7 @@
 # 🎙️ PIO-Net: Comprehensive Research & Implementation Report (Phases 1–4)
 
 **Author:** Gigi Koneti (ML, Dataset Curation & Acoustic Evaluation Lead)  
-**Collaborators (Embedded Systems Team):** Adarsh & Anukul (RP2040 Microarchitecture, PIO Assembly & Firmware Execution)  
+**Collaborators (Embedded Systems Team):** Adarsha Udupa Baikady & Anukul Anand (RP2040 Microarchitecture, PIO Assembly & Firmware Execution)  
 **Target Conferences:** ACM SenSys 2027 (CPS-IoT Week) & IIT Bombay ResCon 2026  
 **Status:** 100% Implemented, Mathematically Verified & Publication-Ready  
 
@@ -23,16 +23,16 @@ Voice assistants and smart keyword wake-up systems (like "Hey Siri" or "Alexa") 
 
 ---
 
-## How Gigi's Work Connects with the Embedded Team (Adarsh & Anukul)
+## How Gigi's Work Connects with the Embedded Team (Adarsha & Anukul)
 
-This project succeeded because the Machine Learning pipeline (Gigi) and the Embedded Hardware/Firmware pipeline (Adarsh & Anukul) were designed to fit each other like puzzle pieces:
+This project succeeded because the Machine Learning pipeline (Gigi) and the Embedded Hardware/Firmware pipeline (Adarsha & Anukul) were designed to fit each other like puzzle pieces:
 
 ```
 [Digital PDM Microphone]
            │ (1.024 MHz 1-bit PDM stream)
            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ RP2040 PIO Subsystem (Adarsh & Anukul - Embedded Team)       │
+│ RP2040 PIO Subsystem (Adarsha & Anukul - Embedded Team)       │
 │ • State Machine 0 executes 1-cycle/bit popcount match filter│
 │ • Mathematical Match Pattern (Gigi): 0xFFFFFFFF (32 ones)   │
 │ • Decision Threshold (Gigi): θ = 22 / 32                    │
@@ -59,9 +59,9 @@ This project succeeded because the Machine Learning pipeline (Gigi) and the Embe
                 [Target Keyword Detected]
 ```
 
-1. **Gigi designed the math; the Embedded Team wrote the silicon assembly:** Gigi proved mathematically that an all-ones matched filter (`0xFFFFFFFF`) suppresses 2nd-order PDM quantization noise variance by over $99.7\%$, and calibrated the threshold $\theta = 22$. Adarsh and Anukul mapped this into an ultra-tight 20-instruction PIO assembly routine that executes in exactly 1 clock cycle per bit without CPU intervention.
+1. **Gigi designed the math; the Embedded Team wrote the silicon assembly:** Gigi proved mathematically that an all-ones matched filter (`0xFFFFFFFF`) suppresses 2nd-order PDM quantization noise variance by over $99.7\%$, and calibrated the threshold $\theta = 22$. Adarsha and Anukul mapped this into an ultra-tight 20-instruction PIO assembly routine that executes in exactly 1 clock cycle per bit without CPU intervention.
 2. **Gigi designed the memory layout for zero bus contention:** Gigi specified the multi-bank SRAM allocation so DMA writes audio to SRAM Bank 1 while Core 0 executes model weights from SRAM Bank 0/2. The Embedded Team verified with crossbar simulation that zero bus wait-states occurred.
-3. **Gigi trained the neural network with zero runtime overhead:** Gigi trained the model with BatchNorm and mathematically folded the BatchNorm parameters into the convolutional weights so that Adarsh and Anukul could deploy pure INT8 CMSIS-NN C code on the Cortex-M0+ with zero floating-point emulation penalty.
+3. **Gigi trained the neural network with zero runtime overhead:** Gigi trained the model with BatchNorm and mathematically folded the BatchNorm parameters into the convolutional weights so that Adarsha and Anukul could deploy pure INT8 CMSIS-NN C code on the Cortex-M0+ with zero floating-point emulation penalty.
 
 ---
 

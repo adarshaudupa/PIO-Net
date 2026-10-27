@@ -1,6 +1,6 @@
 // ==============================================================================
 // PIO-Net: RP2040 Programmable I/O PDM Audio Capture & Stage-1 Matched Filter
-// Authors: Adarsh & Anukul (Embedded Systems) & Gigi Koneti (ML / Acoustic Lead)
+// Authors: Adarsha Udupa Baikady & Anukul Anand (Embedded Systems) & Gigi Koneti (ML / Acoustic Lead)
 // Project: ACM SenSys 2027
 //
 // Microarchitectural Overview (SenSys 2027 Architecture):
@@ -376,7 +376,7 @@ int main(void)
     printf("\n=======================================================\n");
     printf("   PIO-Net: Embedded Acoustic Wake-Up Core (SM-A)     \n");
     printf("   SenSys 2027 Research Project                        \n");
-    printf("   Authors: Adarsh, Anukul & Gigi                      \n");
+    printf("   Authors: Adarsha Udupa Baikady, Anukul Anand & Gigi Koneti \n");
     printf("=======================================================\n");
     printf("Configuration:\n");
     printf(" - PDM CLK Pin:       GPIO %d (Target: 1.024 MHz)\n", PIONET_PDM_CLK_PIN);

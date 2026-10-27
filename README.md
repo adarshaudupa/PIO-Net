@@ -5,7 +5,7 @@
 [![Target Symposium](https://img.shields.io/badge/Target-IIT%20Bombay%20ResCon%202026-orange)](https://unstop.com/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**Authors:** Gigi Koneti\*, Adarsha Baikady\*, Anukul\*  
+**Authors:** Gigi Koneti\*, Adarsha Udupa Baikady\*, Anukul Anand\*  
 *\*All authors contributed equally to this work (Co-First Authorship).*
 
 ---
@@ -209,7 +209,7 @@ This project is licensed under the MIT License.
 ```bibtex
 @inproceedings{koneti2027pionet,
   title     = {PIO-Net: Ultra-Low-Power Cascaded Acoustic Wake-Up on Microcontrollers via Programmable I/O Gating},
-  author    = {Koneti, Gigi and Baikady, Adarsha and Anukul},
+  author    = {Koneti, Gigi and Baikady, Adarsha Udupa and Anand, Anukul},
   booktitle = {Proceedings of the International Conference on Embedded Artificial Intelligence and Sensing Systems (ACM SenSys)},
   year      = {2027}
 }

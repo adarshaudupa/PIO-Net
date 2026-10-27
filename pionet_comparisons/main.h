@@ -1,6 +1,6 @@
 // ==============================================================================
 // PIO-Net: Acoustic Wake-Up via RP2040 PIO State Machine (SM-A)
-// Authors: Adarsh & Anukul (Embedded Team) & Gigi Koneti (ML / Acoustic Lead)
+// Authors: Adarsha Udupa Baikady & Anukul Anand (Embedded Team) & Gigi Koneti (ML / Acoustic Lead)
 // Project: SenSys 2027
 // ==============================================================================
 

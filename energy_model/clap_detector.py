@@ -1,7 +1,7 @@
 """
 ==============================================================================
 PIO-Net: Acoustic Wake-Up & Power Profiling - Supply Current Clap Detector
-Authors: Adarsh & Anukul (Embedded Systems) & Gigi Koneti (ML / Acoustic Lead)
+Authors: Adarsha Udupa Baikady & Anukul Anand (Embedded Systems) & Gigi Koneti (ML / Acoustic Lead)
 Project: ACM SenSys 2027
 
 Microarchitectural & Power Context:
