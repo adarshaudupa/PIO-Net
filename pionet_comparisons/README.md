@@ -27,18 +27,16 @@ This directory provides standalone firmware targets for reproducing the empirica
 
 ### Empirical Measurements (INA226 @ VSYS = 4.08V)
 
-| Metric | Config A: Continuous Polling | Config B: Duty-Cycled Wake | Config C: PIO-Net (Ours) |
+| Metric | Config A: Continuous Software VAD | Config B: Duty-Cycled Wake | Config C: PIO-Net (Ours) |
 | :--- | :---: | :---: | :---: |
 | **Quiescent System Clock** | 125 MHz | 125 MHz | **24 MHz** |
 | **Burst System Clock** | 125 MHz | 125 MHz | **125 MHz** |
-| **Acoustic Trigger Method** | Continuous Software VAD | Periodic 10 ms Software VAD | **PIO1 Silicon Matched Filter** |
-| **CPU Wakeups in Silence** | Continuous (100% active) | 100 wakes/sec (every 10 ms) | **0 wakes/sec (Pure silicon)** |
-| **Quiescent Current ($I_{\text{listen}}$)** | **23.90 mA** | **20.55 mA** | **7.05 mA** |
-| **Quiescent Power ($P_{\text{listen}}$)** | **97.4 mW** | **83.8 mW** | **28.8 mW** |
-| **Inference Burst Current ($I_{\text{burst}}$)** | **24.42 mA** | **24.38 mA** | **24.65 mA** |
-| **Inference Burst Power ($P_{\text{burst}}$)** | **99.5 mW** | **99.2 mW** | **100.8 mW** |
-| **Quiescent Power Reduction** | *Baseline (1.00×)* | *14.0% saved ($1.16\times$)* | **70.5% saved ($3.39\times$ lower)** |
-| **Advantage over Duty-Cycled** | — | *Baseline (1.00×)* | **65.7% saved ($2.91\times$ lower)** |
+| **CPU Wake Rate in Silence** | 100% Active Polling | 100 Hz Timer Wakeups | **0 Hz (Zero CPU Wakeups)** |
+| **Measured Idle Current ($I_{\text{listen}}$)** | **23.90 mA** | **20.55 mA** | **7.00 mA** |
+| **Idle Power @ 4.08V ($P_{\text{listen}}$)** | **97.5 mW** | **83.8 mW** | **28.6 mW** |
+| **Peak Inference Current ($I_{\text{burst}}$)** | **24.42 mA** | **24.30 mA** | **24.65 mA** |
+| **Idle Power Savings vs. Config A** | *Baseline (0%)* | *14.0% saved ($1.16\times$)* | **70.7% saved ($3.41\times$ lower)** |
+| **Idle Power Savings vs. Config B** | — | *Baseline (0%)* | **65.9% saved ($2.93\times$ lower)** |
 
 ---
 
