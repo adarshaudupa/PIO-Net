@@ -1,0 +1,26 @@
+.program pdm_reader
+.side_set 1
+
+.wrap_target
+    in pins, 1          side 1  ; CLK HIGH and sample PDM Data bit into ISR
+    nop                 side 0  ; CLK LOW
+.wrap
+
+% c-sdk {
+static inline void pdm_reader_program_init(PIO pio, uint sm, uint offset, uint pin_data, uint pin_clk) {
+    pio_sm_config c = pdm_reader_program_get_default_config(offset);
+
+    sm_config_set_in_pins(&c, pin_data);
+    sm_config_set_sideset_pins(&c, pin_clk);
+    sm_config_set_in_shift(&c, true, true, 32);
+    sm_config_set_clkdiv(&c, 61.03515625f);
+
+    pio_gpio_init(pio, pin_data);
+    pio_gpio_init(pio, pin_clk);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_clk,  1, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_data, 1, false);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

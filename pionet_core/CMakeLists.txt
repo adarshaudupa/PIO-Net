@@ -51,15 +51,19 @@ target_include_directories(pionet_core PRIVATE
 )
 
 target_link_libraries(pionet_core PRIVATE
+    -Wl,--wrap=set_sys_clock_pll
     pico_stdlib
     hardware_pio
     hardware_gpio
-        hardware_dma
-        pico_multicore
+    hardware_dma
+    hardware_clocks
+    hardware_pll
+    hardware_resets
+    pico_multicore
 )
 
-option(PIONET_ENABLE_STDIO_USB "Enable USB stdio output" ON)
-option(PIONET_VARIANT2_POWER "Build variant2 with USB stdio, telemetry, and status LED disabled for power measurements" OFF)
+option(PIONET_ENABLE_STDIO_USB "Enable USB stdio output" OFF)
+option(PIONET_VARIANT2_POWER "Build variant2 with USB stdio, telemetry, and status LED disabled for power measurements" ON)
 
 if (PIONET_VARIANT2_POWER)
     set(PIONET_ENABLE_STDIO_USB OFF)
@@ -67,9 +71,15 @@ if (PIONET_VARIANT2_POWER)
 endif ()
 
 pico_add_extra_outputs(pionet_core)
-if (PIONET_ENABLE_STDIO_USB)
-    pico_enable_stdio_usb(pionet_core 1)
-else ()
-    pico_enable_stdio_usb(pionet_core 0)
-endif ()
+pico_enable_stdio_usb(pionet_core 0)
 pico_enable_stdio_uart(pionet_core 0)
+
+# ------------------------------------------------------------------------------
+# Pure Baseline WFI Target (Core 1 reset, Core 0 in wfi, no USB CDC, no telemetry)
+# Generates pico_wfi_baseline.uf2 for measuring the ~1.3 mA - 1.5 mA chip baseline
+# ------------------------------------------------------------------------------
+add_executable(pico_wfi_baseline baseline_wfi.c)
+target_link_libraries(pico_wfi_baseline PRIVATE pico_stdlib hardware_clocks hardware_pll hardware_gpio)
+pico_add_extra_outputs(pico_wfi_baseline)
+pico_enable_stdio_usb(pico_wfi_baseline 0)
+pico_enable_stdio_uart(pico_wfi_baseline 0)

@@ -41,3 +41,5 @@ compile_commands.json
 build/
 cmake-build-*/
 *.pio.h
+*.uf2
+*.elf
